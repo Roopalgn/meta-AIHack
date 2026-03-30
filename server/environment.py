@@ -91,6 +91,8 @@ class HelpdeskTicketRoutingEnvironment(BaseEnvironment):
 
     def state(self) -> HelpdeskTicketState:
         return HelpdeskTicketState(
+            episode_id=self._episode_id,
+            step_count=self._index,
             current_task_id=self._task.id if self._task else None,
             seed=self._seed,
             queue_ticket_ids=[t.ticket_id for t in self._queue],

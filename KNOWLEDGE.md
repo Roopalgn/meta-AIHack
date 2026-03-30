@@ -142,6 +142,13 @@ The agent predicts:
 - `onboarding`
 - `feature_request`
 
+### Priorities
+
+- `critical`
+- `high`
+- `medium`
+- `low`
+
 ### Assignment groups
 
 - `license_ops`

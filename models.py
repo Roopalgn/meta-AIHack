@@ -39,6 +39,8 @@ class HelpdeskTicketObservation(Observation):
 
 
 class HelpdeskTicketState(State):
+    episode_id: str = ""
+    step_count: int = 0
     current_task_id: Optional[int] = None
     seed: Optional[int] = None
     queue_ticket_ids: list[str] = Field(default_factory=list)
