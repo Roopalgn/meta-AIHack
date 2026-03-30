@@ -1,0 +1,59 @@
+name: it_helpdesk_ticket_routing_openenv
+version: "0.1.0"
+description: >
+  Deterministic IT helpdesk ticket routing environment for issue classification,
+  prioritization, assignment, and resolution decisions. Built on the OpenEnv framework.
+author: Hackstreet Boys - Roopal Guha Neogi, Suyash Kumar
+
+environment:
+  type: openenv
+  entry_point: server.environment:HelpdeskTicketRoutingEnvironment
+  action_model: models:HelpdeskTicketAction
+  observation_model: models:HelpdeskTicketObservation
+  state_model: models:HelpdeskTicketState
+
+tasks:
+  - name: Issue Type Classification
+    difficulty: easy
+    objective: Predict the correct IT issue type for a helpdesk ticket.
+  - name: Issue Type And Priority
+    difficulty: medium
+    objective: Predict the correct issue type and priority.
+  - name: Full Ticket Routing
+    difficulty: hard
+    objective: Predict issue type, priority, assignment group, and resolution action.
+
+api:
+  endpoints:
+    - /health
+    - /reset
+    - /step
+    - /state
+    - /tasks
+    - /docs
+
+evaluation:
+  reward_range:
+    min: 0.0
+    max: 1.0
+  deterministic: true
+
+grading: normalized
+reproducible: true
+
+inference:
+  script: inference.py
+  env_vars:
+    - API_BASE_URL
+    - MODEL_NAME
+    - HF_TOKEN
+
+requirements:
+  python: ">=3.11"
+  dependencies:
+    - openenv-core
+    - fastapi>=0.115
+    - pydantic>=2.7
+    - uvicorn>=0.30
+    - httpx>=0.25
+    - openai>=1.68
