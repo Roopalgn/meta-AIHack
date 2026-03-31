@@ -32,7 +32,7 @@ TASKS = {
         "name": "Full Ticket Routing",
         "difficulty": "hard",
         "instructions": (
-            "Perform full helpdesk triage by selecting the best issue type, "
+            "Perform full helpdesk routing by selecting the best issue type, "
             "priority, assignment group, and resolution action for the ticket."
         ),
         "allowed_fields": [

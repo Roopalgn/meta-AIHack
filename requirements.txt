@@ -2,5 +2,5 @@ openenv-core @ git+https://github.com/meta-pytorch/OpenEnv.git
 fastapi>=0.115
 pydantic>=2.7
 uvicorn>=0.30
-openai>=1.0
+openai>=1.68
 httpx>=0.25

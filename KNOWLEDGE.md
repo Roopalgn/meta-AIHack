@@ -1,134 +1,51 @@
 # IT Helpdesk Ticket Routing OpenEnv - Knowledge Guide
 
-## Part 1: What The Hackathon Wants
+## What The Hackathon Is Looking For
 
-The hackathon is asking for a real-world environment that an AI agent can learn from through the standard OpenEnv interface.
+The judges want a real-world environment that follows the OpenEnv pattern and can be understood quickly.
 
-In plain terms, the judges want:
+That means this repo needs:
 
-1. a real human job, not a toy problem
-2. typed models for actions, observations, and state
-3. `reset()`, `step()`, and `state()`
-4. at least 3 tasks with increasing difficulty
-5. deterministic graders that return scores from `0.0` to `1.0`
-6. a meaningful reward function
-7. a baseline `inference.py`
-8. Docker and deployment readiness
+1. typed action, observation, and state models
+2. working `reset()`, `step()`, and `state()`
+3. at least three difficulty levels
+4. deterministic grading
+5. meaningful reward shaping
+6. a baseline `inference.py`
+7. Docker and metadata that are easy to rerun
 
-## Part 2: Why This Repo Uses IT Helpdesk Ticket Routing
+## Why IT Helpdesk Ticket Routing Fits Well
 
-IT helpdesk ticket routing is a strong OpenEnv domain because it is:
+This domain is a strong fit because it is:
 
-- a real operational workflow
+- realistic
+- structured
+- judge-friendly
+- deterministic to grade
 - naturally multi-step
-- easy to express with typed actions and observations
-- easy to score deterministically
-- useful for evaluating planning, classification, and routing ability in agents
 
-## Part 3: The Core Mental Model
+A helpdesk agent has to decide what the ticket is about, how urgent it is, who should own it, and what should happen next. That maps cleanly to a typed action object.
 
-Think of this environment as a queue of helpdesk tickets.
+## The Repo In One Sentence
 
-For each ticket, the agent must answer:
+This environment simulates a short helpdesk queue where an agent routes one ticket at a time and is graded on structured routing quality.
 
-- what kind of issue is this
-- how urgent is it
-- which resolver group should own it
-- what should happen next
+## Frozen Project Identity
 
-The environment shows one ticket at a time. The agent responds with structured fields. The grader scores that response. Then the environment moves to the next ticket.
+- Team name: `Hackstreet Boys`
+- Members: `Roopal Guha Neogi`, `Suyash Kumar`
+- Domain: `IT Helpdesk Ticket Routing`
+- OpenEnv name: `it_helpdesk_ticket_routing_openenv`
+- App environment name: `it_helpdesk_ticket_routing`
 
-## Part 4: Main Files
+## Frozen Runtime Vocabulary
 
-### `models.py`
-
-Defines the typed objects used everywhere:
-
-- `HelpdeskTicketRecord`
-- `HelpdeskTicketAction`
-- `HelpdeskTicketObservation`
-- `HelpdeskTicketState`
-
-### `server/environment.py`
-
-This is the core engine.
-
-It:
-
-- loads the dataset
-- samples a queue of 3 to 5 tickets
-- tracks progress
-- grades each step
-- computes the final episode reward
-
-### `server/grader.py`
-
-Contains deterministic scoring logic.
-
-It gives:
-
-- exact or partial credit for `issue_type`
-- exact or proximity credit for `priority`
-- exact credit for `assignment_group`
-- exact credit for `resolution_action`
-
-### `server/reward.py`
-
-Contains reward helpers:
-
-- per-step reward clamping
-- final trajectory reward calculation
-
-### `server/tasks.py`
-
-Defines the difficulty ladder:
-
-- Task 1: issue type only
-- Task 2: issue type plus priority
-- Task 3: full routing
-
-### `server/app.py`
-
-Creates the OpenEnv app and exposes a custom `/tasks` route.
-
-### `client.py`
-
-Typed client used by the inference script.
-
-### `inference.py`
-
-The baseline agent runner.
-
-It can:
-
-- use a real LLM through an OpenAI-compatible API
-- or fall back to a keyword heuristic
-
-## Part 5: Tasks
-
-### Task 1: Issue Type Classification
-
-The agent predicts:
-
-- `issue_type`
-
-### Task 2: Issue Type And Priority
-
-The agent predicts:
-
-- `issue_type`
-- `priority`
-
-### Task 3: Full Ticket Routing
-
-The agent predicts:
+### Fields
 
 - `issue_type`
 - `priority`
 - `assignment_group`
 - `resolution_action`
-
-## Part 6: Ticket Vocabulary
 
 ### Issue types
 
@@ -159,46 +76,13 @@ The agent predicts:
 - `ignore`
 - `acknowledge`
 
-## Part 7: Episode Flow
+## Main Models
 
-### `reset()`
+### `HelpdeskTicketRecord`
 
-Starts a new episode:
+Represents the labeled dataset row used for grading.
 
-1. chooses a task
-2. samples a queue of tickets
-3. resets state
-4. returns the first observation
-
-### `step(action)`
-
-Processes one ticket:
-
-1. grades the action
-2. stores the score
-3. advances the queue index
-4. returns the next ticket or the final reward
-
-### `state`
-
-Returns the internal state snapshot.
-
-## Part 8: Reward Logic
-
-Step reward:
-
-- just the current ticket score clamped to `[0.0, 1.0]`
-
-Final reward:
-
-- average of all per-ticket scores
-- minus a small overshoot penalty if too many steps were taken
-
-This keeps the signal dense and easy to interpret.
-
-## Part 9: Dataset Shape
-
-Each ticket record contains:
+Important fields:
 
 - `ticket_id`
 - `title`
@@ -211,48 +95,188 @@ Each ticket record contains:
 - optional `ambiguity_note`
 - optional `related_ticket_id`
 
-The current dataset contains 45 tickets.
+### `HelpdeskTicketAction`
 
-It includes:
+Represents the agent submission. Fields are optional because different tasks score different subsets.
 
-- straightforward tickets
-- ambiguous tickets
-- follow-up references to earlier tickets
+### `HelpdeskTicketObservation`
 
-## Part 10: Inference Script In Simple Terms
+Represents what the agent sees for each step:
 
-`inference.py` is the script that actually "plays" the environment.
+- task metadata
+- visible ticket fields
+- queue progress
+- score history
 
-For each task it:
+### `HelpdeskTicketState`
 
-1. connects to the server
-2. resets the environment
-3. reads the current ticket
-4. decides an action
-5. sends the action back
-6. collects scores
-7. prints a summary
+Represents the internal episode state used by the environment.
 
-If LLM credentials are available, it uses an LLM.
-If not, it uses keyword rules.
+## Episode Flow
 
-## Part 11: What Still Needs Verification
+### `reset()`
 
-The important next checks are:
+On reset, the environment:
 
-1. run the server locally
-2. verify the ticket-routing client path works end to end
-3. rerun `inference.py`
-4. record fresh baseline scores
-5. validate Docker and OpenEnv behavior
+1. chooses the task definition
+2. samples a queue of 3 to 5 tickets
+3. initializes a new episode id and state
+4. returns the first observation
 
-## Part 12: One-Minute Summary
+### `step(action)`
 
-If you only remember one thing, remember this:
+On each step, the environment:
 
-- this repo is now an IT helpdesk ticket router
-- the mechanics are still the same multi-step OpenEnv pattern
-- one ticket is shown at a time
+1. grades the action against the current ticket
+2. stores the per-ticket score
+3. increments queue progress
+4. returns the next observation or final result
+
+### `state()`
+
+Returns the internal state snapshot for debugging or inspection.
+
+## Task Design
+
+### Task 1: Issue Type Classification
+
+The agent only predicts:
+
+- `issue_type`
+
+Purpose:
+
+- establish the simplest classification baseline
+
+### Task 2: Issue Type And Priority
+
+The agent predicts:
+
+- `issue_type`
+- `priority`
+
+Purpose:
+
+- force the agent to understand both topic and urgency
+
+### Task 3: Full Ticket Routing
+
+The agent predicts:
+
+- `issue_type`
+- `priority`
+- `assignment_group`
+- `resolution_action`
+
+Purpose:
+
+- evaluate complete operational routing behavior
+
+## Grading Mental Model
+
+The grader is deterministic and intentionally simple to explain.
+
+- `issue_type` gets exact or partial credit for selected near-miss pairs
+- `priority` gets exact or proximity credit
+- `assignment_group` gets exact credit
+- `resolution_action` gets exact credit
+
+Task weighting:
+
+- Task 1: only `issue_type`
+- Task 2: `issue_type` 60%, `priority` 40%
+- Task 3: `issue_type` 35%, `priority` 20%, `assignment_group` 25%, `resolution_action` 20%
+
+## Reward Mental Model
+
+Step reward:
+
+- current ticket score clamped to `[0.0, 1.0]`
+
+Final reward:
+
+- average of ticket scores
+- minus a small overshoot penalty for taking more steps than the queue length
+
+This gives dense feedback while still rewarding efficient episode completion.
+
+## Dataset Mental Model
+
+The dataset is small enough to audit manually but varied enough to support a meaningful benchmark.
+
+Current structure:
+
+- 45 tickets
+- clear easy examples
+- medium cases where urgency matters
+- harder ambiguous cases
+- follow-up tickets connected through `related_ticket_id`
+
+The dataset is meant to test routing judgment, not just keyword spotting.
+
+## Inference Script In Simple Terms
+
+`inference.py` is the baseline agent runner.
+
+It:
+
+1. connects to the environment
+2. loads the available tasks
+3. runs one episode per task
+4. picks an action for each ticket
+5. sends the action back through the client
+6. records rewards
+7. prints a task-by-task summary
+
+It supports:
+
+- heuristic mode with no external model
+- LLM mode through an OpenAI-compatible API
+
+## Files That Matter Most
+
+- `vocabulary.py`: locked constants and default routing maps
+- `models.py`: typed schema and validation
+- `server/environment.py`: episode engine
+- `server/tasks.py`: task ladder and dataset loader
+- `server/grader.py`: deterministic scoring
+- `server/reward.py`: reward helpers
+- `server/app.py`: OpenEnv app entry point
+- `client.py`: typed multi-step client
+- `openenv.yaml`: environment metadata
+- `server/Dockerfile`: container entry point
+
+## April 2 Validation Notes
+
+This checkpoint is mainly about consistency.
+
+What should agree after April 2:
+
+- docs say ticket routing, not email processing
+- docs use the same vocabulary as the code
+- `openenv.yaml`, `pyproject.toml`, and `requirements.txt` describe the same runtime surface
+- Docker startup matches the documented server entry point
+- local setup instructions match the current repo layout
+
+## What Still Needs Hands-On Verification
+
+The biggest remaining checks are runtime checks, not design checks.
+
+Still pending:
+
+1. run the environment locally
+2. run heuristic inference end to end
+3. confirm Docker starts cleanly
+4. record fresh baseline numbers
+5. do a final clean-machine dry run
+
+## One-Minute Summary
+
+If you come back to this repo later, remember:
+
+- the domain is IT helpdesk ticket routing
+- the environment is a short queue, not a single-shot classifier
 - the agent predicts structured routing fields
-- the grader gives deterministic partial credit
-- `inference.py` is the baseline agent runner
+- grading is deterministic with limited partial credit
+- the inference script is the baseline player
+- April 2 is the point where docs and packaging should fully match the code
