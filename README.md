@@ -159,6 +159,29 @@ It includes:
 - feature requests
 - follow-up cases linked through `related_ticket_id`
 
+## Difficulty Coverage
+
+The difficulty ladder is visible both in the task fields and in the dataset itself.
+
+Easy-style examples:
+
+- `ticket-020`: straightforward general inquiry with low urgency and a clean `general_inquiry` label
+- `ticket-041`: clear onboarding request for a new contractor account
+- `ticket-044`: obvious phishing-style lure that should map cleanly to `spam_phishing`
+
+Medium-style examples:
+
+- `ticket-001`: billing dispute that still requires the agent to judge urgency correctly
+- `ticket-028`: application incident where the issue type is clear but priority still matters
+- `ticket-036`: procurement-style proof-of-concept request that should route as a `service_request`
+
+Hard-style examples:
+
+- `ticket-022`: mixed billing and application signals in one ticket
+- `ticket-029`: seat expansion combined with a prorating question
+- `ticket-038`: follow-up billing thread with escalated urgency
+- `ticket-045`: repeated account suspension thread with legal-escalation pressure
+
 ## Repository Layout
 
 ```text

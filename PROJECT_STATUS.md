@@ -1,0 +1,137 @@
+# Project Status
+
+This is the canonical running status file for the repo.
+
+Use this file for future progress updates instead of creating new date-specific status files.
+
+## March 30, 2026
+
+Status: complete
+
+Scope completed:
+
+- locked team name, domain, and vocabulary
+- aligned the foundational schema and environment surface
+- froze the core class names and field names
+
+Core files aligned:
+
+- `models.py`
+- `server/tasks.py`
+- `server/grader.py`
+- `server/environment.py`
+- `client.py`
+- `server/app.py`
+- `inference.py`
+- `vocabulary.py`
+
+Key checkpoint outcome:
+
+- the project had a single vocabulary source of truth and no remaining schema disagreement
+
+## March 31, 2026
+
+Status: complete
+
+Roopal-side work completed:
+
+- audited `data/dataset.json` end to end
+- tightened ambiguity wording in selected tickets
+- reviewed task wording in `server/tasks.py`
+
+Representative dataset decisions:
+
+- `ticket-022` kept as `application_support` while making the billing-versus-application ambiguity clearer
+- `ticket-027` kept intentionally ambiguous between `general_inquiry` and `service_request`
+- `ticket-029` was refined to better express seat-expansion versus prorating ambiguity
+- `ticket-040` was kept as `feature_request` while clarifying that some readers could still interpret it as `application_support`
+
+Task wording changes:
+
+- Task 1 was tightened to emphasize selecting the single best IT issue type
+- Task 2 now explicitly asks for operational priority, not just generic urgency
+- Task 3 wording was refined to describe full helpdesk routing more concretely
+
+Shared checkpoint outcome:
+
+- no schema changes were still pending after the review pass
+
+## April 1, 2026
+
+Status: complete
+
+Roopal-side work completed:
+
+- polished `server/grader.py`
+- made task weights explicit
+- refined hard-task partial-credit behavior
+- finished remaining dataset label corrections
+
+Important label/grader notes:
+
+- `ticket-026` was corrected to `general_inquiry` routed to `service_desk`
+- Task 2 weights were fixed at `issue_type` 60% and `priority` 40%
+- Task 3 weights were fixed at `issue_type` 35%, `priority` 20%, `assignment_group` 25%, and `resolution_action` 20%
+- partial-credit pairs were added for `application_support` vs `feature_request`
+- partial-credit pairs were added for `general_inquiry` vs `service_request`
+
+Shared checkpoint outcome:
+
+- the docs and code agreed on the exact task labels and field vocabulary
+
+## April 2, 2026
+
+Status: complete
+
+Roopal-side work completed:
+
+- improved `README.md`
+- improved `KNOWLEDGE.md`
+
+Packaging and metadata alignment completed in repo state:
+
+- `openenv.yaml` aligned with runtime naming and dependency expectations
+- `pyproject.toml` and `requirements.txt` use the same OpenEnv dependency source
+- `server/Dockerfile` installs the local package and documented runtime dependencies
+
+Shared checkpoint outcome:
+
+- docs and code tell the same IT helpdesk ticket routing story
+
+## April 3, 2026
+
+Status: Roopal work complete, shared validation underway
+
+Roopal-side work completed:
+
+- performed a dataset realism pass on `data/dataset.json`
+- replaced several low-realism spam examples with clearer helpdesk-inbox phrasing
+- cleaned visible mojibake dashes from ticket titles
+- added explicit easy, medium, and hard dataset examples to `README.md`
+
+Runtime validation notes recorded from the local repo state:
+
+- local `reset()` and `inference.py` validation exposed a UTF-8 BOM issue in dataset loading
+- `server/tasks.py` was updated to read `data/dataset.json` with `utf-8-sig`
+- the heuristic baseline then completed successfully
+
+Local heuristic baseline on the validated repo state:
+
+- Task 1: `1.0000`
+- Task 2: `0.8800`
+- Task 3: `0.9400`
+- Overall: `0.9400`
+
+Shared checkpoint outcome so far:
+
+- the first bug triage item was identified and fixed
+- a rerun on the latest fully merged branch is still recommended before treating benchmark numbers as final
+
+## Open Items
+
+Still pending after the current checkpoint:
+
+- rerun runtime validation on the latest shared branch after all pending merges land
+- perform a Docker smoke test from the merged repo state
+- do the April 4 issue-fix pass from any runtime feedback
+- record final benchmark numbers only after the merged-state rerun
