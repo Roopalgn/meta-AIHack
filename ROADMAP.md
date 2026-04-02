@@ -1,4 +1,4 @@
-# Hackstreet Boys Roadmap
+# Hackstreet Boys Final Roadmap
 
 ## Team
 
@@ -8,53 +8,63 @@
   - Suyash Kumar
 - Submission deadline: April 8, 2026, 11:59 PM IST
 
-## Goal
+## How To Use This File
 
-Ship a clean, well-documented OpenEnv environment for IT helpdesk ticket routing that:
+- `PROJECT_STATUS.md` is the canonical log of completed work.
+- This roadmap is now the remaining execution plan from the current merged repo state to final submission.
+- `analysis/comp.md`, `analysis/comp_know.md`, and `analysis/inference.md` are internal prioritization notes only. Use them to guide priorities, but do not mention competitor repos in public-facing docs.
 
-- passes all submission gates
-- scores well on real-world utility
-- has deterministic, defensible grading
-- is easy for judges to understand and rerun
+## Current Repo State
 
-## When You Start Coding
+The repo has already established the core submission shape:
 
-Start coding immediately on **March 30, 2026** after a short 30 to 60 minute alignment pass.
+- locked IT helpdesk ticket routing domain
+- locked vocabulary and task names
+- 3-task difficulty ladder
+- deterministic grading with partial credit
+- working heuristic baseline
+- merged local validation on `/health`, `/tasks`, and `inference.py`
+- current local benchmark reference:
+  - Task 1: `1.0000`
+  - Task 2: `0.8800`
+  - Task 3: `0.9400`
+  - Overall: `0.9400`
 
-That first coding session should do only high-leverage foundation work:
+The remaining work is no longer broad feature development. The remaining work is:
 
-- lock the exact ticket vocabulary
-- freeze field names in `models.py`
-- confirm task fields in `server/tasks.py`
-- agree on grader labels in `server/grader.py`
-- agree that no one changes schema names casually after this point
+1. final packaging and deployment readiness
+2. clean rerun evidence
+3. small high-impact improvements that strengthen submission quality without risking regressions
+4. freeze and submit early
 
-### First coding targets on March 30, 2026
+## Submission Gates That Must Be True
 
-Roopal should start with:
+These are the practical must-pass items from `PLAN.md` and `KNOWLEDGE.md`:
 
-- `data/dataset.json`
-- `server/tasks.py`
-- `server/grader.py`
+- the environment starts correctly
+- `reset()`, `step()`, and `state()` behave correctly
+- 3 tasks exist and remain meaningfully different
+- grader scores stay in `[0.0, 1.0]`
+- `inference.py` runs reproducibly without crashing
+- Docker builds and starts cleanly
+- docs and metadata are current
+- the repo is easy for judges to understand and rerun
 
-Suyash should start with:
+## Final Priority Order
 
-- `models.py`
-- `server/environment.py`
-- `inference.py`
+If time gets tight, prioritize in this exact order:
 
-By the end of the first coding block, both of you should have:
+1. merged Docker and deployment validation
+2. clean-copy rerun
+3. README and metadata readiness for Hugging Face / OpenEnv deployment
+4. small reward and observation improvements that strengthen RL value
+5. extra polish
 
-- matching field names
-- matching task labels
-- matching issue-type vocabulary
-- no unresolved schema disagreements
-
-## Working Model For Two People
-
-The safest way for two people to work separately and merge cleanly is to divide ownership by file groups, not by abstract ideas.
+## Ownership From Now Until Submission
 
 ### Roopal ownership
+
+Files already owned:
 
 - `data/dataset.json`
 - `server/tasks.py`
@@ -63,16 +73,23 @@ The safest way for two people to work separately and merge cleanly is to divide 
 - `KNOWLEDGE.md`
 - `MENTAL_MODEL.md`
 
-Primary responsibilities:
+Roopal mandatory finish-line responsibilities:
 
-- dataset quality
-- label consistency
-- task wording
-- grader realism
-- documentation clarity
-- judging-story polish
+- keep the docs judge-friendly and fully current
+- add Hugging Face Spaces README frontmatter
+- keep the task story and public explanation simple and strong
+- make only safe grader improvements that improve reward quality without destabilizing labels
+- sync benchmark references in docs if any runtime change alters the numbers
+
+Roopal optional high-value improvements:
+
+- add a short TRL / GRPO usage example to `README.md`
+- expand the issue-type similarity matrix with only a few safe, reviewable near-miss pairs
+- add one or two sharper hard-case examples in docs if useful
 
 ### Suyash ownership
+
+Files already owned:
 
 - `models.py`
 - `server/environment.py`
@@ -85,255 +102,156 @@ Primary responsibilities:
 - `pyproject.toml`
 - `requirements.txt`
 
-Primary responsibilities:
+Suyash mandatory finish-line responsibilities:
 
-- runtime correctness
-- OpenEnv interface
-- inference reliability
-- Docker and deployment readiness
-- integration behavior
+- keep the runtime stable from the merged branch
+- confirm Docker evidence on the merged submission branch
+- add `.openenvignore` for cleaner `openenv push` packaging
+- verify deployment assumptions around `app_port: 7860`, `/health`, `/docs`, `/ws`, and `/web`
+- do a clean-copy install-and-run pass from a fresh clone if possible
+- rerun `inference.py` after any runtime-side change
 
-## Merge Strategy
+Suyash optional high-value improvements:
 
-To keep parallel work easy to combine:
+- enrich observation history with slightly more useful prior-step context
+- support an optional `queue_size` reset kwarg if the change stays tiny and low-risk
 
-1. avoid editing the same file on the same day unless planned
-2. use one shared terminology list and do not invent alternate labels
-3. sync once daily with a 10 minute review of:
-   - changed files
-   - open blockers
-   - any schema changes
-4. freeze the dataset schema early
-5. freeze the action and observation field names early
+### Shared responsibilities
 
-## Shared Source Of Truth
+- do not rename schemas or vocabulary
+- rerun the benchmark after any code change that could affect behavior
+- keep `PROJECT_STATUS.md` honest
+- use the GitHub Actions Docker smoke workflow when local Docker is blocked by machine setup
+- stop adding risky features before the deadline day
 
-These files should be treated as authoritative:
+## Improvements Worth Doing Before April 8
 
-- `README.md` for the public project story
-- `PLAN.md` for project requirements and definition of done
-- `MENTAL_MODEL.md` for the current system shape
-- `openenv.yaml` for environment metadata
-- `server/tasks.py` and `server/grader.py` for task rules
+These are the best ideas from the competitive analysis that are still worth doing this late.
 
-## AI Usage Policy
+### P0: Do before submission
 
-AI is permitted, so use it aggressively where it saves time, but do not outsource judgment.
+- add Hugging Face Spaces frontmatter to `README.md`
+- add `.openenvignore`
+- make sure the merged branch has a green Docker smoke result
+- do one clean-copy rerun outside the current working tree if possible
 
-Good uses of AI:
+### P1: Do only if the repo remains stable
 
-- draft clearer task descriptions
-- propose additional hard-case tickets
-- suggest edge cases and label audits
-- improve prompts in `inference.py`
-- generate test ideas and checklists
-- improve README structure and wording
+- add a short TRL / GRPO integration example to `README.md`
+- expand `ISSUE_TYPE_SIMILARITY` with only a few obvious, defensible pairs such as:
+  - `onboarding` vs `service_request`
+  - `feature_request` vs `service_request`
+  - `security_compliance` vs `identity_access`
+- enrich `history` slightly if it helps multi-step reasoning and does not bloat observations
 
-Human review required for:
+### P2: Defer unless everything else is already green
 
-- final dataset labels
-- grader weights and partial-credit rules
-- any claims in README
-- final benchmark numbers
-- submission metadata and deployment settings
+- optional `queue_size` reset override
 
-## Submission Criteria Checklist
+## Improvements To Avoid Before The Deadline
 
-### Must pass
+These ideas came up in the analysis, but they are too risky or too large for the remaining time window:
 
-- environment starts correctly
-- `reset()`, `step()`, and `state()` behave correctly
-- 3 tasks exist and are meaningfully different
-- grader scores are in `[0.0, 1.0]`
-- `inference.py` runs without error
-- Docker builds and starts
-- docs are complete and current
+- MCP migration
+- transform-based reward refactor
+- large dataset expansion from 45 to 100 tickets
+- major schema changes
+- broad prompt or inference rewrites that could disturb the stable baseline
+- big dependency-management changes just for polish
 
-### Must score well
-
-- the task feels like real IT helpdesk work
-- the hard task is genuinely harder
-- the grader gives partial credit in sensible ways
-- the environment is easy to understand and rerun
-
-## Timeline
-
-### March 30, 2026
-
-- lock team name, domain, and vocabulary
-- finish repo cleanup
-- agree on ownership split
-- start coding the core schema and task logic immediately after the vocabulary lock
-- target a same-day checkpoint on:
-  - `models.py`
-  - `server/tasks.py`
-  - `server/grader.py`
-  - `server/environment.py`
-
-### March 31, 2026
-
-Roopal:
-
-- audit `data/dataset.json` labels end to end
-- tighten ambiguous cases
-- review task wording in `server/tasks.py`
-- continue code work in `server/grader.py` if partial-credit tuning is still needed
-
-Suyash:
-
-- sanity-check `models.py`, `server/environment.py`, and `client.py`
-- check that the field names align everywhere
-- continue code work in `inference.py` and `server/app.py`
-
-Shared checkpoint:
-
-- confirm no schema changes are still pending
-
-### April 1, 2026
-
-Roopal:
-
-- polish `server/grader.py`
-- confirm hard-task logic and partial-credit behavior
-- finish any remaining dataset label corrections
-
-Suyash:
-
-- polish `inference.py`
-- confirm heuristic mode uses the new ticket vocabulary consistently
-- finish runtime code adjustments in `client.py`, `server/app.py`, and `server/reward.py`
-
-Shared checkpoint:
-
-- agree on the exact labels and examples used in docs
-
-### April 2, 2026
-
-Roopal:
-
-- improve `README.md`
-- improve `KNOWLEDGE.md`
-
-Suyash:
-
-- validate `openenv.yaml`
-- validate `server/Dockerfile`
-- validate dependency files
-
-Shared checkpoint:
-
-- ensure docs and code tell the same story
-
-### April 3, 2026
-
-Roopal:
-
-- do a dataset realism pass
-- make sure examples clearly cover easy, medium, and hard cases
-
-Suyash:
-
-- perform the first full local runtime pass
-- run heuristic inference
-- note bugs or schema mismatches
-
-Shared checkpoint:
-
-- bug triage and fix list
-
-### Practical coding rule
-
-If you are wondering "should we still be planning or should we code now?", the answer is:
-
-- **March 30 to April 4, 2026 = active coding and fixes**
-- **April 5 to April 6, 2026 = validation, docs, and score recording**
-- **April 7 to April 8, 2026 = freeze, smoke tests, and submission**
-
-### April 4, 2026
-
-Roopal:
-
-- fix data, wording, and documentation issues from runtime feedback
-
-Suyash:
-
-- fix environment, inference, and Docker issues from runtime feedback
-
-Shared checkpoint:
-
-- second full local run
-
-### April 5, 2026
-
-Roopal:
-
-- finalize README and knowledge docs
-- prepare a concise judge-facing explanation of the domain
-
-Suyash:
-
-- confirm Docker flow
-- confirm all required env vars are documented and handled
-
-Shared checkpoint:
-
-- record benchmark numbers if stable
+## Date-By-Date Execution Plan
 
 ### April 6, 2026
 
-- full dry run from a clean copy if possible
-- verify every required file is present
-- check for stale claims and outdated wording
+Primary goal:
+
+- lock down deployment readiness and clean rerun evidence
+
+Roopal:
+
+- add Hugging Face Spaces README frontmatter
+- keep judge-facing README language concise and strong
+- review whether a small issue-similarity expansion is safe enough to land
+
+Suyash:
+
+- add `.openenvignore`
+- verify the Docker smoke workflow on the merged branch
+- do a clean-copy install plus `inference.py` rerun from a fresh clone if possible
+
+Shared checkpoint:
+
+- Docker evidence is green
+- clean-copy rerun is complete or explicitly blocked
+- no stale claims remain in docs
 
 ### April 7, 2026
 
-- freeze feature changes
-- only bug fixes, validation, and submission packaging
-- verify final docs, metadata, and benchmark numbers
+Primary goal:
+
+- only high-signal improvements, then freeze
+
+Roopal:
+
+- add a short TRL / GRPO example if it can be written cleanly
+- make at most one final safe grader improvement if benchmark stability is preserved
+- do a final docs consistency pass across `README.md`, `KNOWLEDGE.md`, and `MENTAL_MODEL.md`
+
+Suyash:
+
+- make only tiny runtime improvements if they are clearly helpful and low-risk
+- otherwise freeze the runtime and packaging files
+- rerun the benchmark if any runtime-side change lands
+
+Shared checkpoint:
+
+- final benchmark numbers recorded if unchanged or freshly rerun if changed
+- docs, metadata, and runtime all tell the same story
+- feature work stops by the end of the day
 
 ### April 8, 2026
 
-- do one last deployment and smoke test early in the day
-- stop risky edits several hours before deadline
-- submit before 11:59 PM IST
+Primary goal:
 
-## Integration Rules
+- submit from a calm, validated repo state
 
-To keep merges painless:
+Morning:
 
-1. do not rename schemas after April 1, 2026
-2. do not change task labels after April 2, 2026 without both agreeing
-3. do not edit ownership files casually
-4. if one person must touch the other person's file, call it out before doing it
-5. keep a short daily changelog in chat or a shared note
+- run one final smoke test on the submission branch
+- verify Docker evidence still exists on the merged commit
+- verify `README.md`, `openenv.yaml`, and required files are present and current
 
-## Definition Of Done For Each Member
+Afternoon:
 
-### Roopal done means
+- make only typo-level or packaging-only fixes
+- do not make risky grader, dataset, or runtime changes
 
-- dataset labels are internally consistent
-- docs are submission-ready
-- the hard task feels meaningfully harder than the easy and medium tasks
+Final submission rule:
 
-### Suyash done means
+- stop risky edits several hours before the 11:59 PM IST deadline
+- submit early if the repo is already green
 
-- the environment runs end to end
-- the inference script works in heuristic mode
-- Docker and metadata are in good shape
+## What Counts As Complete
 
-## Final Two-Day Priority Order
+### April 6 complete means
 
-If time gets tight, prioritize in this exact order:
+- merged Docker validation exists
+- clean-copy rerun evidence exists or a specific blocker is documented
+- deployment-readiness files are in place
 
-1. working environment
-2. working inference script
-3. valid grader and tasks
-4. Docker and metadata
-5. README clarity
-6. extra polish
+### April 7 complete means
+
+- any remaining safe improvements are merged
+- final benchmark reference is recorded
+- docs and metadata are frozen
+
+### April 8 complete means
+
+- final smoke test is done
+- submission has been sent
 
 ## Simple Rule To Remember
 
-Roopal owns the story and the labels.
-Suyash owns the runtime and the rails.
-Both review the final submission together.
+Roopal owns the story, labels, and public clarity.
+Suyash owns the runtime, packaging, and reproducibility rails.
+Both of you should optimize for a clean, rerunnable, judge-friendly submission rather than chasing last-minute complexity.
