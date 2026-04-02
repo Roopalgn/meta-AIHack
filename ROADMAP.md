@@ -1,4 +1,4 @@
-# Hackstreet Boys Roadmap
+# Hackstreet Boys Final Roadmap
 
 ## Team
 
@@ -7,338 +7,507 @@
   - Roopal Guha Neogi
   - Suyash Kumar
 - Submission deadline: April 8, 2026, 11:59 PM IST
-- Current planning checkpoint: April 3, 2026
+
+## How To Use This File
+
+- `PROJECT_STATUS.md` is the canonical log of completed work.
+- This roadmap is the remaining execution plan from the current repo state to final submission.
+- `PLAN.md` defines the must-pass gates.
+- `KNOWLEDGE.md` defines the current repo truth and judge-facing explanation.
+- `analysis/comp.md`, `analysis/comp_know.md`, and `analysis/inference.md` are internal competitive notes only. Use them to prioritize work, but do not mention competitor repos in public-facing docs.
 
 ## What We Are Optimizing For
 
-These are the main wins for the final stretch, in order:
+The highest-value wins from now to submission are:
 
-1. **RL improvement**
-2. **Robustness**
+1. **Robustness**
+   - prove the env works through unit, smoke, and integration tests
+   - make Docker and clean reruns boring and reliable
+
+2. **RL improvement**
+   - keep the reward deterministic
+   - make sure scoring is not "always fuzzy"
+   - add only small, safe improvements that strengthen reward quality or episode usefulness
+
 3. **Real-world grounding**
-4. **Submission safety**
+   - ground our taxonomy and partial-credit choices against real public support-ticket datasets
+   - do this as an audit / evidence layer, not as a late dataset merge
 
-In practice, that means:
+4. **Submission readiness**
+   - satisfy every requirement from `PLAN.md` and `KNOWLEDGE.md`
+   - keep the repo easy for judges to understand and rerun
 
-- improve the reward and episode behavior only where changes are low-risk and test-backed
-- add strong automated validation so the repo feels reliable, not hand-wavy
-- ground our taxonomy and partial-credit choices against real external IT support data without trying to absorb that data into the runtime dataset this late
-- avoid broad refactors that create new failure modes near submission
+## Current Repo State
 
-## Honest Scope Call
+The repo already has:
 
-What is viable before the deadline:
+- locked IT helpdesk routing domain
+- locked vocabulary and task names
+- 3-task difficulty ladder
+- deterministic grading with limited partial credit
+- working heuristic baseline
+- merged local validation on `/health`, `/tasks`, and `inference.py`
+- current local benchmark reference:
+  - Task 1: `1.0000`
+  - Task 2: `0.8800`
+  - Task 3: `0.9400`
+  - Overall: `0.9400`
 
-- unit tests
-- smoke tests
-- focused integration tests
-- deterministic regression checks
-- lightweight RL-oriented scoring improvements
-- grounding audits against public real-world support datasets
+The remaining work should be treated as targeted strengthening, not broad feature invention.
 
-What is **not** viable before the deadline:
+## Submission Gates That Must Still Hold
 
-- replacing `data/dataset.json` with an external dataset
-- redesigning the taxonomy from scratch
-- large architecture rewrites
-- open-ended benchmark expansion without validation
+These come directly from `PLAN.md` and `KNOWLEDGE.md`:
 
-## Guardrails
+- the environment starts correctly
+- `reset()`, `step()`, and `state()` behave correctly
+- 3 tasks exist and remain meaningfully different
+- grader scores stay in `[0.0, 1.0]`
+- `inference.py` runs reproducibly without crashing
+- Docker builds and starts cleanly
+- docs and metadata are current
+- the repo is easy for judges to understand and rerun
 
-To stay on track:
+## Scope Decisions
 
-1. do not merge external datasets into the main runtime dataset before submission
-2. do not broaden the action schema or rename fields
-3. do not make reward changes unless tests prove exact, zero, and partial-credit cases clearly
-4. every Codex-generated code change must end with tests or validation evidence
-5. prefer small, bounded implementation passes over one large all-at-once rewrite
+### Do Now
 
-## Working Model With Codex
+- add tests:
+  - unit
+  - smoke
+  - integration
+- prove the scorer is crisp where it should be crisp
+- add only safe RL-oriented improvements
+- add external grounding evidence without changing the runtime dataset
+- finish packaging / deployment readiness
 
-Using Codex to generate all implementation work is viable **if we keep each ask narrow and verifiable**.
+### Do Not Do Before Submission
 
-Best pattern:
+- MCP migration
+- transform-based reward refactor
+- large dataset expansion
+- external dataset merge into `data/dataset.json`
+- major schema changes
+- broad prompt / inference rewrites that could disturb the stable baseline
+- dependency churn just for polish
 
-1. ask for one bounded change set
-2. add or update tests in the same pass
-3. run the relevant checks
-4. only then move to the next improvement
+## Codex-First Working Rules
 
-Bad pattern:
+Because we are using Codex to generate code, we should optimize for small, bounded tasks:
 
-- ask for tests, scoring changes, dataset expansion, CI, and docs all in one prompt
+1. one prompt = one scoped change set
+2. keep ownership by file group
+3. require tests for any scorer or runtime change
+4. review the diff before accepting generated code
+5. rerun the relevant test slice after each meaningful change
+6. do not ask Codex for a giant multi-file redesign this late
 
-## Last-Mile Phase Plan
+## Phased Plan
 
-### Phase 1: Test Foundation
+## Phase 1: Test And Robustness Foundation
+
 **Window:** April 3 to April 4
 
-**Primary objective:** make the current env provably correct before we tune anything
+**Goal:** eliminate the biggest competitive weakness identified in `analysis/comp.md` and `analysis/inference.md`: lack of checked-in tests.
 
-Deliverables:
+### Must produce
 
-- add `pytest`-based test structure
-- add unit tests for:
-  - `server/grader.py`
-  - `server/reward.py`
-  - `server/tasks.py`
-  - `models.py` where validation matters
-- add smoke tests for:
-  - environment `reset()`
-  - environment `step()`
-  - deterministic seeded behavior
-  - score range `[0.0, 1.0]`
-- add focused integration tests for:
-  - FastAPI endpoints such as `/health`, `/tasks`, `/reset`, `/step`, `/state`
-  - one full seeded episode through the app surface
+- `tests/` with at least:
+  - grader unit tests
+  - task / dataset loader unit tests
+  - reward / score-range unit tests
+  - environment smoke tests
+  - API integration tests
 
-Most important assertions in this phase:
+### Test plan
 
-- exact matches score `1.0`
-- unrelated wrong labels score `0.0`
-- only approved near-miss pairs receive partial credit
-- assignment group and resolution action remain exact-match fields
-- the environment is deterministic when seeded
-- the baseline path still completes all tasks
+#### Unit tests
 
-Exit criteria:
+- exact match gives `1.0`
+- unsupported task IDs fail clearly
+- only intended near-miss issue-type pairs get partial credit
+- unrelated wrong issue types get `0.0`
+- priority proximity rules behave exactly as defined
+- assignment group and resolution action remain exact-match only
+- task weights sum and apply correctly
+- dataset loads cleanly with `utf-8-sig`
 
-- tests clearly prove the scorer is **not** "always fuzzy"
-- core environment behavior is covered by automated checks
-- we can change scoring logic later without guessing whether we broke it
-
-### Phase 2: RL Improvement Without Big Risk
-**Window:** April 4 to April 5
-
-**Primary objective:** make the reward surface better for RL while preserving determinism and judge clarity
-
-Allowed improvements in this phase:
-
-- refine `ISSUE_TYPE_SIMILARITY` only where justified and test-backed
-- tighten priority partial-credit coverage if tests show obvious gaps
-- improve episode history if it helps multi-step learning and does not complicate grading
-- add deterministic regression checks around expected baseline behavior
-- optionally add a safe `queue_size` override in `reset()` only if it is clean and fully tested
-
-Non-goals for this phase:
-
-- no new fields in the public schema
-- no major reward-architecture refactor
-- no broad rubric redesign
-
-Decision rule:
-
-- if a proposed RL improvement makes scoring harder to explain, skip it
-- if it improves learning signal and is easy to test, keep it
-
-Exit criteria:
-
-- reward logic is still simple to explain
-- exactness is preserved where it should be exact
-- any extra partial credit is intentional, narrow, and documented by tests
-
-### Phase 3: Real-World Grounding Audit
-**Window:** April 5 to April 6
-
-**Primary objective:** show that our labels and ambiguity rules are grounded in real support data, without late-stage dataset merge risk
-
-Grounding approach:
-
-- audit our taxonomy against public real-world support datasets
-- use those datasets as reference material, not as direct training/runtime data
-- document what they validate about our domain, labels, and near-miss structure
-
-Recommended external references:
-
-- `Classification of IT Support Tickets` (Zenodo): manually classified IT support tickets
-- `Semantic Similarity of IT Support Tickets` (Zenodo): manually labeled support-ticket similarity pairs
-- `MSDialog`: Microsoft technical support conversations for realistic support-language patterns
-
-Concrete work in this phase:
-
-- compare our issue types to external category patterns
-- review whether our ambiguous tickets reflect real support ambiguity
-- justify or reject candidate partial-credit pairs using external examples
-- note any obvious taxonomy blind spots for future work
-
-Important constraint:
-
-- do **not** import external rows into `data/dataset.json` at this stage
-- do **not** claim full external-dataset benchmarking unless we actually run it
-
-Exit criteria:
-
-- we can honestly say our environment design is grounded against real support data
-- any scoring adjustments introduced in Phase 2 have an external rationale, not just intuition
-
-### Phase 4: Hardening And Regression Safety
-**Window:** April 6 to April 7
-
-**Primary objective:** make the repo reliable from the outside, not just locally understandable
-
-Deliverables:
-
-- run the full test suite on the merged repo state
-- keep or improve Docker smoke coverage
-- if feasible, add CI for `pytest` in addition to Docker smoke
-- rerun heuristic baseline and confirm it remains stable after test/scoring changes
-- verify docs still match the implemented behavior
-
-Exit criteria:
-
-- runtime behavior, tests, and docs all agree
-- no unresolved ambiguity remains about the baseline numbers
-- Docker and app-surface behavior have at least one real validation path
-
-### Phase 5: Freeze And Submission Packaging
-**Window:** April 7 to April 8
-
-**Primary objective:** stop taking avoidable risk
-
-Allowed work:
-
-- bug fixes
-- doc corrections
-- metadata fixes
-- smoke-test reruns
-- submission packaging
-
-Avoid in this phase:
-
-- new dataset content
-- scoring experiments
-- structural refactors
-- "nice-to-have" features
-
-Exit criteria:
-
-- the repo is stable
-- the docs are accurate
-- the submission story is clear
-
-## Test Strategy
-
-### Unit Tests
-
-Goal:
-
-- prove the scorer, reward helpers, and dataset/task loaders behave exactly as intended
-
-Priority unit targets:
-
-- `grade_action()` exact-match, zero-score, and partial-credit cases
-- unsupported `task_id` behavior
-- task weights summing to expected behavior
-- reward helper bounds
-- dataset loader behavior including Windows BOM handling
-
-### Smoke Tests
-
-Goal:
-
-- prove the environment works end to end with minimal assumptions
-
-Priority smoke targets:
+#### Smoke tests
 
 - `reset()` returns a valid observation
-- `step()` advances the queue
-- final reward stays in `[0.0, 1.0]`
-- same seed gives the same episode behavior
-- heuristic baseline completes without crashing
+- `step()` advances queue progress
+- `state()` reflects runtime state
+- seeded resets are deterministic
+- scores remain in `[0.0, 1.0]`
+- one full episode per task completes without errors
 
-### Integration Tests
-
-Goal:
-
-- prove the real app surface behaves correctly, not just the pure Python helpers
-
-Priority integration targets:
+#### Integration tests
 
 - `/health`
 - `/tasks`
 - `/reset`
 - `/step`
 - `/state`
-- one full seeded episode through the app or client layer
+- one end-to-end seeded episode over HTTP or client path
+- one heuristic `inference.py` regression check on expected overall behavior
 
-## RL Improvement Rules
+### Why this phase matters
 
-We should improve RL usefulness in ways that keep the env judge-friendly.
+- addresses the biggest repo-quality gap vs stronger competitors
+- improves robustness
+- gives us safe rails for all later RL and grounding changes
 
-Good RL improvements:
+## Phase 2: Scoring Calibration And Safe RL Improvements
 
-- clearer deterministic feedback
-- better exact-vs-partial boundaries
-- richer but still simple episode history
-- deterministic controls that help reproducible rollouts
+**Window:** April 4 to April 5
 
-Bad RL improvements:
+**Goal:** improve RL usefulness without destabilizing the submission.
 
-- vague similarity expansion without examples
-- turning exact business-routing fields into fuzzy fields
-- adding complexity that makes the README harder to explain
+### Must produce
 
-## Grounding Rules
+- scorer calibration evidence that the system is not "always fuzzy"
+- only a few safe RL-oriented improvements if tests stay green
 
-Grounding matters, but it must stay lightweight this late.
+### Required calibration checks
 
-Good grounding work:
+- exact-match path is dominant and clearly tested
+- fuzziness exists only in explicitly defined cases
+- wrong labels outside the similarity map score `0.0`
+- assignment group and resolution action remain exact
+- final episode reward stays bounded and deterministic
 
-- audit our taxonomy against public support-ticket datasets
-- use real support phrasing to validate dataset realism
-- use labeled similarity pairs to justify a few near-miss cases
+### Safe improvement candidates from `analysis/inference.md`
 
-Bad grounding work:
+- expand `ISSUE_TYPE_SIMILARITY` with only a few defensible pairs, if backed by grounding review
+- enrich `history` with:
+  - ticket title
+  - predicted fields
+- optionally support `queue_size` as a reset kwarg only if the change is tiny and fully tested
 
-- rushed ingestion of external datasets
-- category remapping that forces taxonomy churn
-- unsupported claims that our scores are benchmarked externally when they are not
+### Hard stop
 
-## Ownership Split For The Final Stretch
+- if a change touches behavior and shifts baseline numbers unexpectedly, stop and stabilize rather than stacking more changes
+
+## Phase 3: Real-World Grounding Audit
+
+**Window:** April 5 to April 6
+
+**Goal:** add defensible evidence that our taxonomy and partial-credit logic are grounded in real support data, without merging external data into runtime.
+
+### Grounding strategy
+
+- use real public support datasets as reference material
+- compare their labels / examples against our taxonomy
+- create an internal audit, not a runtime dependency
+
+### Recommended grounding references
+
+- `Classification of IT Support Tickets` (Zenodo, 2,229 manually classified tickets)
+- `Semantic Similarity of IT Support Tickets` (Zenodo, 300 manually labeled ticket pairs)
+- `MSDialog` for real technical-support conversation patterns and terminology
+
+### Must produce
+
+- an internal grounding note or checklist that captures:
+  - which public datasets were reviewed
+  - how our labels map to real-world ticket themes
+  - which partial-credit pairs are defensible
+  - which proposed similarity pairs were rejected as too fuzzy
+
+### Useful output
+
+- 10 to 20 grounding examples:
+  - real ticket theme
+  - closest label in our taxonomy
+  - whether it should be exact-match only or partial-credit-adjacent
+
+### Why this phase matters
+
+- strengthens real-world credibility
+- supports RL reward quality with evidence
+- helps avoid arbitrary or over-fuzzy scorer changes
+
+## Phase 4: Packaging, Deployment, And Judge-Facing Polish
+
+**Window:** April 6 to April 7
+
+**Goal:** close the submission-readiness gaps surfaced in `analysis/comp_know.md` and `analysis/inference.md`.
+
+### Must produce
+
+- Hugging Face Spaces README frontmatter
+- `.openenvignore`
+- Docker smoke evidence on the merged branch
+- one clean-copy rerun if possible
+
+### Nice-to-have only if green
+
+- short TRL / GRPO example in `README.md`
+- concise note in docs that grading is deterministic, partially structured, and not purely fuzzy
+
+### Do not do here
+
+- no dataset expansion
+- no major inference rewrite
+- no architecture refactor
+
+## Phase 5: Freeze And Submit
+
+**Window:** April 8
+
+**Goal:** submit from a calm, validated repo state.
+
+### Final day rules
+
+- only typo-level, doc-level, or packaging-only fixes
+- no risky scorer changes
+- no runtime refactors
+- no dataset edits unless they fix a blocker
+- stop risky edits several hours before submission
+
+## Ownership From Now Until Submission
 
 ### Roopal ownership
 
-- grounding audit
-- ticket realism review
-- documentation updates
-- competitive-positioning clarity
+Primary files:
+
+- `data/dataset.json`
+- `server/tasks.py`
+- `server/grader.py`
+- `README.md`
+- `KNOWLEDGE.md`
+- `MENTAL_MODEL.md`
+
+Primary responsibilities:
+
+- scorer calibration and label quality
+- unit tests around grader / task rules / dataset invariants
+- real-world grounding audit
+- judge-facing explanation of deterministic scoring and real-world realism
+- safe reward-quality improvements only when grounded and tested
+
+Concrete deliverables:
+
+- grader unit tests
+- grounding mapping note
+- any similarity-matrix update, if justified
+- doc updates if benchmark numbers or scoring explanation change
+- README frontmatter and judge-facing clarity
 
 ### Suyash ownership
 
-- tests
-- runtime hardening
-- scoring and reward implementation changes
-- Docker and integration validation
+Primary files:
 
-### Shared review items
+- `models.py`
+- `server/environment.py`
+- `server/app.py`
+- `server/reward.py`
+- `client.py`
+- `inference.py`
+- `openenv.yaml`
+- `server/Dockerfile`
+- `pyproject.toml`
+- `requirements.txt`
 
-- any changes to partial-credit rules
-- any benchmark number updates
-- final submission claims
+Primary responsibilities:
 
-## Priority Order If Time Gets Tight
+- smoke and integration tests
+- runtime stability
+- Docker and deployment readiness
+- inference reproducibility
+- clean rerun evidence
+- optional small RL-signal improvements on the runtime side
 
-If the deadline compresses further, do this exact order:
+Concrete deliverables:
 
-1. unit tests proving non-fuzzy scoring behavior
-2. smoke and integration tests for seeded deterministic runs
-3. grounding audit against external real-world support datasets
-4. low-risk RL reward improvements
-5. CI and extra polish
+- env smoke tests
+- API integration tests
+- heuristic inference regression path
+- `.openenvignore`
+- Docker smoke confirmation
+- clean-copy rerun if possible
 
-## Definition Of Done For This Final Plan
+### Shared responsibilities
 
-We are done when:
+- do not rename schemas or vocabulary
+- rerun the benchmark after any behavior-affecting change
+- keep `PROJECT_STATUS.md` honest
+- use the GitHub Actions Docker smoke workflow when local Docker is blocked
+- review Codex-generated diffs before accepting them
+- freeze feature work by the end of April 7
 
-1. the scorer is test-backed and clearly not "always fuzzy"
-2. the environment has unit, smoke, and integration coverage
-3. the main RL improvements are implemented without hurting clarity
-4. grounding is supported by external real-world support datasets
-5. Docker, baseline behavior, and docs are all in sync
+## Date-By-Date Execution Plan
+
+## April 3, 2026
+
+Primary goal:
+
+- lock the execution plan and begin test scaffolding immediately
+
+Roopal:
+
+- finalize the exact scorer behaviors that must be proven by tests
+- list the exact-match-only cases and intended partial-credit cases
+- begin grader and task-loader unit tests
+
+Suyash:
+
+- scaffold `tests/`
+- begin smoke tests for `reset()`, `step()`, `state()`, and deterministic seeded behavior
+- confirm how integration tests will hit the app cleanly
+
+Shared checkpoint:
+
+- test strategy is agreed
+- file ownership is clear
+- no one is making unscoped runtime changes yet
+
+## April 4, 2026
+
+Primary goal:
+
+- land the first complete test layer
+
+Roopal:
+
+- complete grader, task, and dataset unit tests
+- add explicit tests showing where fuzziness is allowed and where it is not
+
+Suyash:
+
+- complete smoke tests
+- add first-pass integration tests for `/health`, `/tasks`, `/reset`, and `/step`
+
+Shared checkpoint:
+
+- checked-in tests exist
+- the repo can prove deterministic scoring and score bounds
+- any failing behavior is triaged before adding improvements
+
+## April 5, 2026
+
+Primary goal:
+
+- improve RL usefulness safely
+
+Roopal:
+
+- start the grounding audit using the selected public datasets
+- decide whether any additional similarity pairs are truly defensible
+
+Suyash:
+
+- add integration coverage for full seeded episode flow and `state()`
+- add a light heuristic regression path for `inference.py`
+- optionally enrich observation history if tests are already green
+
+Shared checkpoint:
+
+- tests are stable
+- any RL-oriented change is small and justified
+- no baseline drift goes unexplained
+
+## April 6, 2026
+
+Primary goal:
+
+- finish grounding evidence and close packaging gaps
+
+Roopal:
+
+- finish grounding audit note
+- land only the scorer adjustments supported by audit evidence, if any
+- update docs to reflect deterministic, grounded scoring
+
+Suyash:
+
+- add `.openenvignore`
+- verify Docker smoke workflow on the merged branch
+- check deployment assumptions around `app_port`, `/docs`, `/health`, `/ws`, and `/web`
+
+Shared checkpoint:
+
+- grounding evidence exists
+- packaging gaps are closed or explicitly blocked
+- benchmark references are still current
+
+## April 7, 2026
+
+Primary goal:
+
+- freeze on a green, submission-ready repo
+
+Roopal:
+
+- final docs consistency pass across `README.md`, `KNOWLEDGE.md`, and `MENTAL_MODEL.md`
+- add a short TRL / GRPO usage example only if everything else is already green
+
+Suyash:
+
+- do a clean-copy install-and-run pass if possible
+- rerun heuristic baseline if any runtime-side change landed
+- freeze runtime files by end of day
+
+Shared checkpoint:
+
+- tests are green
+- Docker evidence exists
+- docs, metadata, and runtime tell the same story
+- feature work stops
+
+## April 8, 2026
+
+Primary goal:
+
+- submit early from a calm repo state
+
+Morning:
+
+- run final smoke / test slice on the submission branch
+- verify required files are present
+- verify README and metadata are current
+
+Afternoon:
+
+- only typo-level or packaging-only fixes
+- no risky code changes
+
+Final rule:
+
+- stop risky edits several hours before 11:59 PM IST
+- submit as soon as the repo is clearly green
+
+## Cut Order If Time Gets Tight
+
+Cut these first:
+
+1. `queue_size` reset kwarg
+2. richer `history`
+3. TRL / GRPO README example
+4. any optional similarity expansion beyond the most defensible cases
+
+Do not cut these:
+
+1. tests
+2. scorer crispness checks
+3. Docker / deployment validation
+4. grounding audit evidence
+5. final benchmark sanity rerun if behavior changed
+
+## Definition Of Done
+
+The project is ready when:
+
+1. unit, smoke, and integration tests exist and cover the critical paths
+2. scoring is demonstrably deterministic and not fuzzy by default
+3. a grounding audit against real public support datasets exists
+4. the heuristic baseline still runs successfully
+5. Docker build and run are validated
+6. docs and metadata are current and judge-friendly
+7. the repo is frozen and submitted on time
 
 ## Simple Rule To Remember
 
-Improve learning signal.
-Prove correctness.
-Ground the story in real support data.
-Do not take late-stage dataset-merging risk.
+Roopal owns the labels, scoring truth, grounding, and public clarity.
+Suyash owns the runtime, tests beyond unit scope, packaging, and reproducibility rails.
+Both of you should optimize for a clean, defensible, rerunnable submission rather than last-minute complexity.
