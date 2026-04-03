@@ -470,7 +470,78 @@ Shared checkpoint:
 - tests are green
 - Docker evidence exists
 - docs, metadata, and runtime tell the same story
-- feature work stops
+- feature work stops unless the gated competitive-hardening window below is explicitly activated after all required checks are already green
+
+## After April 7 If Green: Competitive Hardening Window
+
+**Window:** late April 7 to early April 8 only if all required gates are already green
+
+**Goal:** improve the repo's competitive position against the strongest submissions by winning on reliability, validation quality, RL usefulness, and judge readability rather than by trying to match their architecture complexity.
+
+### Activation rule
+
+Activate this block only if all of the following are already true:
+
+- smoke, unit, and integration tests are green
+- Docker evidence exists or the blocker is clearly external
+- `openenv validate` has passed or the closest available validator path is already recorded
+- structured inference logging is already compliant or one tiny remaining fix is clearly isolated
+- the benchmark is stable and any behavior-changing diff can still be rerun safely
+
+If any of those are not true, skip this entire block and proceed directly to freeze / submission.
+
+### Allowed competitive upgrades
+
+- strengthen validation proof:
+  - add or tighten environment smoke tests
+  - add or tighten API integration tests
+  - add one lightweight heuristic regression check for `inference.py`
+- strengthen deployment proof:
+  - record `openenv validate` evidence
+  - record Docker smoke evidence
+  - record deployment-assumption checks for `app_port`, `/health`, `/docs`, `/ws`, and `/web`
+  - record one clean-copy rerun if practical
+- add only tiny RL-signal improvements if fully tested and benchmark-stable:
+  - enrich `history` with ticket title and predicted fields
+  - add `queue_size` as a reset kwarg only if the change remains small, bounded, and fully tested
+- add final judge-facing polish only after runtime proof is green:
+  - short TRL / GRPO README example
+  - concise README note on why our dense deterministic reward is more RL-friendly than binary-only grading
+
+### Hard limits
+
+- do not add MCP
+- do not add a simulator layer
+- do not add browser or multimodal features
+- do not expand the runtime dataset
+- do not make broad inference rewrites
+- do not stack multiple behavior changes without rerunning the benchmark
+
+### Decision rule
+
+- if a competitive-hardening change is tiny, tested, and clearly improves trust or judge readability, it is allowed
+- if it adds architectural ambition at the expense of stability, skip it
+- if it causes unexplained baseline drift, revert to the last green state and submit
+
+### Ownership
+
+Roopal:
+
+- final judge-facing README / KNOWLEDGE / `required.md` polish
+- RL-justification wording around deterministic partial credit
+- TRL / GRPO example only after all runtime proof is green
+
+Suyash:
+
+- validation evidence
+- deployment proof
+- tiny runtime-side RL-signal improvements only if fully tested
+
+Shared checkpoint:
+
+- the repo is already submission-safe before this block starts
+- every change in this block is optional
+- if time gets tight, cut this whole block first
 
 ## April 8, 2026
 
@@ -480,6 +551,7 @@ Primary goal:
 
 Morning:
 
+- if the repo is already fully green, optionally activate the competitive-hardening window above for one last small, tested improvement
 - run final smoke / test slice on the submission branch
 - verify required files are present
 - verify README and metadata are current
@@ -499,6 +571,7 @@ Final rule:
 
 Cut these first:
 
+1. the entire competitive-hardening window after April 7
 1. `queue_size` reset kwarg
 2. richer `history`
 3. TRL / GRPO README example
