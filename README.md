@@ -273,14 +273,14 @@ pip install -e .
 Start the environment locally:
 
 ```bash
-uvicorn server.app:app --host 0.0.0.0 --port 8000
+uvicorn server.app:app --host 0.0.0.0 --port 7860
 ```
 
 Basic checks:
 
 ```bash
-curl http://localhost:8000/health
-curl http://localhost:8000/tasks
+curl http://localhost:7860/health
+curl http://localhost:7860/tasks
 ```
 
 ## Running The Baseline Inference Script
@@ -312,7 +312,7 @@ python inference.py
 Optional target:
 
 - `ENV_URL`
-- default value: `http://localhost:8000`
+- default value: `http://localhost:7860`
 
 ## Runtime Validation Snapshot
 
@@ -349,13 +349,19 @@ Build:
 docker build -f server/Dockerfile -t helpdesk-ticket-routing .
 ```
 
-Run locally while keeping the inference default URL unchanged:
+Run locally:
 
 ```bash
-docker run -p 8000:7860 helpdesk-ticket-routing
+docker run -p 7860:7860 helpdesk-ticket-routing
 ```
 
-If you instead publish the container on another port, set `ENV_URL` accordingly before running `inference.py`.
+Then run inference against it (default `ENV_URL` points to `http://localhost:7860`):
+
+```bash
+python inference.py
+```
+
+If you publish the container on a different host port, set `ENV_URL` accordingly before running `inference.py`.
 
 If local Docker is blocked by machine setup, the repo also includes a GitHub Actions smoke test at `.github/workflows/docker-smoke-test.yml`. That workflow builds the image on a GitHub-hosted runner, starts the container, checks `/health` and `/tasks`, and runs heuristic `inference.py` against the container.
 
@@ -369,7 +375,6 @@ OpenEnv provides the core environment endpoints, and the repo adds a custom task
 | POST | `/reset` | start a new episode |
 | POST | `/step` | submit an action |
 | GET | `/state` | inspect internal state |
-| WebSocket | `/ws` | persistent multi-step client channel |
 | GET | `/tasks` | list task metadata |
 | GET | `/docs` | interactive API docs |
 
