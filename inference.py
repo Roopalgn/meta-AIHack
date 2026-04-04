@@ -6,7 +6,7 @@ Environment variables
 ---------------------
 ENV_URL
     Base URL of the running OpenEnv server.
-    Default: ``http://localhost:8000``
+    Default: ``http://localhost:7860``
 
 API_BASE_URL
     LLM provider base URL (OpenAI-compatible endpoint).
@@ -404,7 +404,7 @@ def run() -> None:
         if task_id in all_results
     ]
     overall_avg = round(sum(overall) / len(overall), 4) if overall else 0.0
-    print(f"Overall average reward: {overall_avg:.4f}")
+    emit_log("END", overall_avg=overall_avg, tasks_completed=len(overall))
 
 
 if __name__ == "__main__":

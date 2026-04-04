@@ -349,13 +349,19 @@ Build:
 docker build -f server/Dockerfile -t helpdesk-ticket-routing .
 ```
 
-Run locally while keeping the inference default URL unchanged:
+Run locally:
 
 ```bash
-docker run -p 8000:7860 helpdesk-ticket-routing
+docker run -p 7860:7860 helpdesk-ticket-routing
 ```
 
-If you instead publish the container on another port, set `ENV_URL` accordingly before running `inference.py`.
+Then run inference against it (default `ENV_URL` points to `http://localhost:7860`):
+
+```bash
+python inference.py
+```
+
+If you publish the container on a different host port, set `ENV_URL` accordingly before running `inference.py`.
 
 If local Docker is blocked by machine setup, the repo also includes a GitHub Actions smoke test at `.github/workflows/docker-smoke-test.yml`. That workflow builds the image on a GitHub-hosted runner, starts the container, checks `/health` and `/tasks`, and runs heuristic `inference.py` against the container.
 
