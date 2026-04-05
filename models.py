@@ -112,3 +112,6 @@ class HelpdeskTicketState(State):
     current_ticket_index: int = 0
     per_ticket_scores: list[float] = Field(default_factory=list)
     total_reward: float = 0.0
+    last_step_reward: Optional[float] = None
+    done: bool = False
+    history_entries: list[dict] = Field(default_factory=list)

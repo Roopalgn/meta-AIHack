@@ -36,6 +36,8 @@ def _coerce_optional_int(value: Any, field_name: str) -> Optional[int]:
 class HelpdeskTicketRoutingEnvironment(
     Environment[HelpdeskTicketAction, HelpdeskTicketObservation, HelpdeskTicketState]
 ):
+    SUPPORTS_CONCURRENT_SESSIONS = True
+
     def __init__(self) -> None:
         super().__init__()
         self._dataset = load_dataset()
@@ -94,16 +96,43 @@ class HelpdeskTicketRoutingEnvironment(
         task_id = self._state.current_task_id
         task = get_task_definition(task_id)
 
+        submitted_fields = {
+            f for f, v in action.model_dump(exclude_none=True).items() if v is not None
+        }
+        allowed = set(task["allowed_fields"])
+        extra_fields = submitted_fields - allowed
+        if extra_fields:
+            # Penalty: record score 0.0, advance index, return penalty observation
+            self._state.per_ticket_scores.append(0.0)
+            self._state.history_entries.append({
+                "ticket_id": current_ticket.ticket_id,
+                "title": current_ticket.title,
+                "predicted": action.model_dump(exclude_none=True),
+                "score": 0.0,
+                "breakdown": {},
+                "penalty_reason": f"extra_fields: {sorted(extra_fields)}",
+            })
+            self._state.step_count += 1
+            self._state.current_ticket_index += 1
+            is_done = self._state.current_ticket_index >= len(self._queue)
+            self._state.last_step_reward = 0.0
+            self._state.done = is_done
+            if is_done:
+                traj_reward = compute_trajectory_reward(
+                    self._state.per_ticket_scores, len(self._queue), self._state.step_count
+                )
+                self._state.total_reward = traj_reward
+            return self._build_observation(task, done=is_done, reward=0.0)
+
         score, breakdown = grade_action(action, current_ticket, task_id)
         step_reward = compute_step_reward(score)
 
-        self._state.per_ticket_scores.append(score)
-        self._state.step_count += 1
-        self._state.current_ticket_index += 1
-
-        is_done = self._state.current_ticket_index >= len(self._queue)
+        is_done = (self._state.current_ticket_index + 1) >= len(self._queue)
 
         if is_done:
+            self._state.per_ticket_scores.append(score)
+            self._state.step_count += 1
+            self._state.current_ticket_index += 1
             traj_reward = compute_trajectory_reward(
                 self._state.per_ticket_scores,
                 len(self._queue),
@@ -112,20 +141,24 @@ class HelpdeskTicketRoutingEnvironment(
             self._state.total_reward = traj_reward
             final_reward = traj_reward
         else:
+            self._state.per_ticket_scores.append(score)
+            self._state.step_count += 1
+            self._state.current_ticket_index += 1
             final_reward = step_reward
 
         history_entry = {
             "ticket_id": current_ticket.ticket_id,
+            "title": current_ticket.title,
+            "predicted": action.model_dump(exclude_none=True),
             "score": score,
             "breakdown": breakdown,
         }
+        self._state.history_entries.append(history_entry)
 
-        return self._build_observation(
-            task,
-            done=is_done,
-            reward=final_reward,
-            extra_history=history_entry,
-        )
+        self._state.last_step_reward = final_reward
+        self._state.done = is_done
+
+        return self._build_observation(task, done=is_done, reward=final_reward)
 
     @property
     def state(self) -> HelpdeskTicketState:
@@ -140,27 +173,26 @@ class HelpdeskTicketRoutingEnvironment(
         task: dict,
         done: bool = False,
         reward: float | None = None,
-        extra_history: dict | None = None,
     ) -> HelpdeskTicketObservation:
         idx = self._state.current_ticket_index
         queue_size = len(self._queue)
 
         if idx < queue_size:
             ticket = self._queue[idx]
-            ticket_view = {
+            ticket_view: dict[str, Any] = {
                 "ticket_id": ticket.ticket_id,
                 "title": ticket.title,
                 "requester": ticket.requester,
                 "description": ticket.description,
             }
+            if ticket.ambiguity_note is not None:
+                ticket_view["ambiguity_note"] = ticket.ambiguity_note
+            if ticket.related_ticket_id is not None:
+                ticket_view["related_ticket_id"] = ticket.related_ticket_id
         else:
             ticket_view = None
 
-        history: list[dict] = []
-        for i, s in enumerate(self._state.per_ticket_scores):
-            history.append({"step": i + 1, "score": s})
-        if extra_history and history:
-            history[-1] = {"step": len(history), **extra_history}
+        history = list(self._state.history_entries)
 
         return HelpdeskTicketObservation(
             done=done,
@@ -172,6 +204,7 @@ class HelpdeskTicketRoutingEnvironment(
             allowed_fields=list(task["allowed_fields"]),
             current_ticket=ticket_view,
             queue_size=queue_size,
+            # tickets_remaining: count of tickets not yet processed after this step
             tickets_remaining=max(0, queue_size - idx),
             tickets_processed=idx,
             history=history,

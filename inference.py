@@ -64,7 +64,7 @@ LOCAL_IMAGE_NAME = os.getenv("LOCAL_IMAGE_NAME")
 ENV_URL = os.getenv("ENV_URL", "http://localhost:7860")
 
 SEED = 42
-TASKS = list(TASK_IDS)
+TASK_ID_ENV = os.getenv("TASK_ID")
 
 # ---------------------------------------------------------------------------
 # LLM helper
@@ -132,6 +132,20 @@ def call_llm(ticket: dict, allowed_fields: list[str], instructions: str) -> dict
 
 def emit_log(tag: str, **payload: Any) -> None:
     print(f"[{tag}] {json.dumps(payload, sort_keys=True, ensure_ascii=True)}")
+
+
+def get_tasks_to_run(available_tasks: dict) -> list[int]:
+    if TASK_ID_ENV:
+        try:
+            task_id = int(TASK_ID_ENV)
+        except ValueError:
+            print(f"[ERROR] TASK_ID={TASK_ID_ENV!r} is not a valid integer", flush=True)
+            raise SystemExit(1)
+        if task_id not in available_tasks:
+            print(f"[WARN] TASK_ID={task_id} not in available tasks {list(available_tasks)}", flush=True)
+            return []
+        return [task_id]
+    return list(TASK_IDS)  # fallback: all tasks (local dev)
 
 
 # ---------------------------------------------------------------------------
@@ -332,7 +346,10 @@ def run() -> None:
 
     all_results: dict[int, dict[str, float | int]] = {}
 
-    for task_id in TASKS:
+    tasks_to_run = get_tasks_to_run(available_tasks)
+    single_task_mode = bool(TASK_ID_ENV)
+
+    for task_id in tasks_to_run:
         if task_id not in available_tasks:
             continue
 
@@ -400,11 +417,12 @@ def run() -> None:
 
     overall = [
         float(all_results[task_id]["final_reward"])
-        for task_id in TASKS
+        for task_id in tasks_to_run
         if task_id in all_results
     ]
-    overall_avg = round(sum(overall) / len(overall), 4) if overall else 0.0
-    emit_log("END", overall_avg=overall_avg, tasks_completed=len(overall))
+    if not single_task_mode:
+        overall_avg = round(sum(overall) / len(overall), 4) if overall else 0.0
+        emit_log("END", overall_avg=overall_avg, tasks_completed=len(overall))
 
 
 if __name__ == "__main__":
