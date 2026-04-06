@@ -151,32 +151,31 @@ class TestExtraFieldsPenalty(unittest.TestCase):
         self.assertIsInstance(obs, HelpdeskTicketObservation)
 
     def test_extra_fields_done_flag_set_correctly_on_last_ticket(self) -> None:
-        """When the penalty step is on the last ticket, done must be True."""
+        """When the penalty step is on the last ticket, done stays True and reward stays episode-level."""
         env = _make_env()
-        # Use a queue of size 1 by controlling the seed — find a seed that gives queue_size=1
-        # Instead, exhaust all but the last ticket normally, then trigger penalty on last
         obs = env.reset(seed=42, task_id=1)
         queue_size = obs.queue_size
+        tickets_by_id = env._tickets_by_id  # noqa: SLF001 - test-only inspection
 
         # Process all tickets except the last one normally
         for _ in range(queue_size - 1):
-            allowed = obs.allowed_fields
-            action_kwargs = {}
-            if "issue_type" in allowed:
-                action_kwargs["issue_type"] = ISSUE_TYPES[0]
-            if "priority" in allowed:
-                action_kwargs["priority"] = PRIORITIES[0]
-            obs = env.step(HelpdeskTicketAction(**action_kwargs))
+            current_ticket_id = obs.current_ticket["ticket_id"]
+            current_ticket = tickets_by_id[current_ticket_id]
+            obs = env.step(HelpdeskTicketAction(issue_type=current_ticket.issue_type))
 
         # Now trigger penalty on the last ticket
+        current_ticket_id = obs.current_ticket["ticket_id"]
+        current_ticket = tickets_by_id[current_ticket_id]
         action = HelpdeskTicketAction(
-            issue_type=ISSUE_TYPES[0],
+            issue_type=current_ticket.issue_type,
             assignment_group=ASSIGNMENT_GROUPS[0],  # extra field
         )
         final_obs = env.step(action)
 
         self.assertTrue(final_obs.done)
-        self.assertEqual(final_obs.reward, 0.0)
+        expected_reward = (queue_size - 1) / queue_size
+        self.assertAlmostEqual(final_obs.reward, expected_reward, places=9)
+        self.assertAlmostEqual(env.state.total_reward, expected_reward, places=9)
 
 
 if __name__ == "__main__":

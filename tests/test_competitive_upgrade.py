@@ -81,7 +81,11 @@ def _heuristic_action(obs: HelpdeskTicketObservation) -> HelpdeskTicketAction:
 # 9.1 — Inference single-task mode
 # ---------------------------------------------------------------------------
 
-def _get_tasks_to_run_impl(task_id_env: str | None, available_tasks: dict) -> list[int]:
+def _get_tasks_to_run_impl(
+    task_id_env: str | None,
+    available_tasks: dict,
+    run_all_tasks: bool = False,
+) -> list[int]:
     """
     Standalone re-implementation of inference.get_tasks_to_run() logic for testing.
 
@@ -94,9 +98,13 @@ def _get_tasks_to_run_impl(task_id_env: str | None, available_tasks: dict) -> li
         except ValueError:
             raise SystemExit(1)
         if task_id not in available_tasks:
-            return []
+            raise SystemExit(1)
         return [task_id]
-    return list(TASK_IDS)
+    if run_all_tasks:
+        return sorted(available_tasks)
+    if not available_tasks:
+        return []
+    return [sorted(available_tasks)[0]]
 
 
 class TestInferenceSingleTaskMode(unittest.TestCase):
@@ -107,14 +115,19 @@ class TestInferenceSingleTaskMode(unittest.TestCase):
         result = _get_tasks_to_run_impl("1", available)
         self.assertEqual(result, [1])
 
-    def test_task_id_set_to_unavailable_id_returns_empty_list(self) -> None:
+    def test_task_id_set_to_unavailable_id_exits(self) -> None:
         available = {1: {}, 2: {}, 3: {}}
-        result = _get_tasks_to_run_impl("999", available)
-        self.assertEqual(result, [])
+        with self.assertRaises(SystemExit):
+            _get_tasks_to_run_impl("999", available)
 
-    def test_task_id_unset_returns_all_task_ids(self) -> None:
+    def test_task_id_unset_defaults_to_first_available_task(self) -> None:
         available = {1: {}, 2: {}, 3: {}}
         result = _get_tasks_to_run_impl(None, available)
+        self.assertEqual(result, [1])
+
+    def test_run_all_tasks_override_returns_all_task_ids(self) -> None:
+        available = {1: {}, 2: {}, 3: {}}
+        result = _get_tasks_to_run_impl(None, available, run_all_tasks=True)
         self.assertEqual(sorted(result), sorted(list(TASK_IDS)))
 
     def test_task_id_set_to_2_returns_only_task_2(self) -> None:
@@ -358,6 +371,271 @@ class TestAmbiguityNoteInObservation(unittest.TestCase):
             obs = env.reset(seed=0, task_id=3)
 
         self.assertIn("ambiguity_note", obs.current_ticket)
+
+
+class TestRelatedTicketPreviewInObservation(unittest.TestCase):
+    """Follow-up tickets expose a lightweight preview of the linked ticket."""
+
+    def _reset_linked_ticket_env(self):
+        from unittest.mock import patch
+
+        dataset = load_dataset()
+        ticket = next((t for t in dataset if t.related_ticket_id is not None), None)
+        self.assertIsNotNone(ticket, "No follow-up ticket found in dataset")
+        related = next(
+            (t for t in dataset if t.ticket_id == ticket.related_ticket_id),
+            None,
+        )
+        self.assertIsNotNone(related, "Linked ticket missing from dataset")
+
+        env = _make_env()
+        with patch.object(env, "_dataset", [ticket]):
+            with patch.object(
+                env,
+                "_tickets_by_id",
+                {ticket.ticket_id: ticket, related.ticket_id: related},
+            ):
+                obs = env.reset(seed=0, task_id=3, queue_size=1)
+
+        return env, obs, related
+
+    def test_related_ticket_preview_present_when_ticket_has_link(self) -> None:
+        env, obs, related = self._reset_linked_ticket_env()
+
+        self.assertIsNotNone(obs.current_ticket)
+        self.assertIn("related_ticket_preview", obs.current_ticket)
+        self.assertEqual(
+            obs.current_ticket["related_ticket_preview"]["ticket_id"],
+            related.ticket_id,
+        )
+        self.assertEqual(
+            obs.current_ticket["related_ticket_preview"]["title"],
+            related.title,
+        )
+
+    def test_history_keeps_related_ticket_preview_after_step(self) -> None:
+        env, obs, related = self._reset_linked_ticket_env()
+        next_obs = env.step(_heuristic_action(obs))
+
+        self.assertGreaterEqual(len(next_obs.history), 1)
+        self.assertIn("related_ticket_preview", next_obs.history[0])
+        self.assertEqual(
+            next_obs.history[0]["related_ticket_preview"]["ticket_id"],
+            related.ticket_id,
+        )
+
+
+class TestObservationQueueContext(unittest.TestCase):
+    """Observation includes clearer queue-position counters."""
+
+    def test_reset_sets_queue_position_and_after_current_counts(self) -> None:
+        env = _make_env()
+        obs = env.reset(seed=0, task_id=1, queue_size=3)
+
+        self.assertEqual(obs.queue_position, 1)
+        self.assertEqual(obs.tickets_remaining, 3)
+        self.assertEqual(obs.tickets_after_current, 2)
+
+    def test_step_updates_queue_position_and_after_current_counts(self) -> None:
+        env = _make_env()
+        obs = env.reset(seed=0, task_id=1, queue_size=3)
+        obs = env.step(_heuristic_action(obs))
+
+        if obs.done:
+            self.assertEqual(obs.queue_position, 0)
+            self.assertEqual(obs.tickets_after_current, 0)
+        else:
+            self.assertEqual(obs.queue_position, 2)
+            self.assertEqual(obs.tickets_remaining, 2)
+            self.assertEqual(obs.tickets_after_current, 1)
+
+
+# ---------------------------------------------------------------------------
+# 9.6b — investigation actions and queue economics
+# ---------------------------------------------------------------------------
+
+class TestInvestigationActions(unittest.TestCase):
+    """Minimal tool-assisted investigate/submit flow works and stays backwards compatible."""
+
+    def _make_linked_env(self):
+        from unittest.mock import patch
+
+        dataset = load_dataset()
+        ticket = next((t for t in dataset if t.related_ticket_id is not None), None)
+        self.assertIsNotNone(ticket, "No follow-up ticket found in dataset")
+        related = next(
+            (t for t in dataset if t.ticket_id == ticket.related_ticket_id),
+            None,
+        )
+        self.assertIsNotNone(related, "Linked ticket missing from dataset")
+        env = _make_env()
+        patch_dataset = patch.object(env, "_dataset", [ticket])
+        patch_lookup = patch.object(
+            env,
+            "_tickets_by_id",
+            {ticket.ticket_id: ticket, related.ticket_id: related},
+        )
+        patch_dataset.start()
+        patch_lookup.start()
+        self.addCleanup(patch_dataset.stop)
+        self.addCleanup(patch_lookup.stop)
+        obs = env.reset(seed=0, task_id=3, queue_size=1)
+        return env, obs, ticket, related
+
+    def test_investigation_action_does_not_advance_queue(self) -> None:
+        env, obs, ticket, related = self._make_linked_env()
+
+        investigate = HelpdeskTicketAction(
+            action_type="investigate",
+            tool_name="lookup_related_ticket",
+            tool_target_ticket_id=ticket.related_ticket_id,
+        )
+        obs2 = env.step(investigate)
+
+        self.assertFalse(obs2.done)
+        self.assertEqual(obs2.tickets_processed, 0)
+        self.assertEqual(obs2.queue_position, 1)
+        self.assertIsNotNone(obs2.last_tool_result)
+        self.assertTrue(obs2.last_tool_result["found"])
+        self.assertEqual(
+            obs2.last_tool_result["ticket"]["ticket_id"],
+            related.ticket_id,
+        )
+
+    def test_submit_after_investigation_completes_episode(self) -> None:
+        env, obs, ticket, related = self._make_linked_env()
+        env.step(
+            HelpdeskTicketAction(
+                action_type="investigate",
+                tool_name="lookup_related_ticket",
+                tool_target_ticket_id=ticket.related_ticket_id,
+            )
+        )
+        final_obs = env.step(
+            HelpdeskTicketAction(
+                issue_type=ticket.issue_type,
+                priority=ticket.priority,
+                assignment_group=ticket.assignment_group,
+                resolution_action=ticket.resolution_action,
+            )
+        )
+
+        self.assertTrue(final_obs.done)
+        self.assertEqual(final_obs.tickets_processed, 1)
+        self.assertGreaterEqual(final_obs.reward, 0.0)
+        self.assertLessEqual(final_obs.reward, 1.0)
+
+    def test_requester_history_tool_returns_matches_for_same_requester(self) -> None:
+        from unittest.mock import patch
+
+        dataset = load_dataset()
+        requester_counts: dict[str, int] = {}
+        for ticket in dataset:
+            requester_counts[ticket.requester] = requester_counts.get(ticket.requester, 0) + 1
+        target_requester = next(
+            (requester for requester, count in requester_counts.items() if count >= 2),
+            None,
+        )
+        self.assertIsNotNone(target_requester, "Dataset has no repeated requester")
+        duplicate_requester_group = [
+            ticket for ticket in dataset if ticket.requester == target_requester
+        ]
+        self.assertGreaterEqual(len(duplicate_requester_group), 2)
+
+        env = _make_env()
+        with patch.object(env, "_dataset", duplicate_requester_group):
+            with patch.object(
+                env,
+                "_tickets_by_id",
+                {ticket.ticket_id: ticket for ticket in duplicate_requester_group},
+            ):
+                obs = env.reset(seed=0, task_id=2, queue_size=1)
+
+        obs2 = env.step(
+            HelpdeskTicketAction(
+                action_type="investigate",
+                tool_name="lookup_requester_history",
+            )
+        )
+
+        self.assertIsNotNone(obs2.last_tool_result)
+        self.assertEqual(obs2.last_tool_result["tool_name"], "lookup_requester_history")
+        self.assertTrue(obs2.last_tool_result["found"])
+        self.assertGreaterEqual(len(obs2.last_tool_result["matches"]), 1)
+
+
+class TestQueueEconomics(unittest.TestCase):
+    """Free investigations are allowed, but excessive investigation gets a queue-level penalty."""
+
+    def test_extra_investigations_reduce_final_reward(self) -> None:
+        from unittest.mock import patch
+
+        dataset = load_dataset()
+        ticket = dataset[0]
+        env = _make_env()
+        with patch.object(env, "_dataset", [ticket]):
+            with patch.object(env, "_tickets_by_id", {ticket.ticket_id: ticket}):
+                obs = env.reset(seed=0, task_id=1, queue_size=1)
+
+        obs = env.step(
+            HelpdeskTicketAction(
+                action_type="investigate",
+                tool_name="lookup_requester_history",
+            )
+        )
+        self.assertEqual(env.state.investigation_steps, 1)
+        self.assertEqual(env.state.investigation_budget_remaining, 0)
+
+        obs = env.step(
+            HelpdeskTicketAction(
+                action_type="investigate",
+                tool_name="lookup_requester_history",
+            )
+        )
+        self.assertEqual(env.state.investigation_steps, 2)
+
+        final_obs = env.step(HelpdeskTicketAction(issue_type=ticket.issue_type))
+
+        self.assertTrue(final_obs.done)
+        self.assertAlmostEqual(final_obs.reward, 0.98, places=9)
+
+
+class TestTerminalInvalidActionFinalReward(unittest.TestCase):
+    """Terminal invalid submit actions should still return the queue-level final reward."""
+
+    def test_last_invalid_submit_returns_trajectory_reward_not_zero(self) -> None:
+        from unittest.mock import patch
+
+        dataset = load_dataset()
+        first = dataset[0]
+        second = dataset[1]
+
+        env = _make_env()
+        with patch.object(env, "_dataset", [first, second]):
+            with patch.object(
+                env,
+                "_tickets_by_id",
+                {first.ticket_id: first, second.ticket_id: second},
+            ):
+                obs = env.reset(seed=0, task_id=1, queue_size=2)
+
+        tickets_by_id = {first.ticket_id: first, second.ticket_id: second}
+        current = tickets_by_id[obs.current_ticket["ticket_id"]]
+        obs = env.step(HelpdeskTicketAction(issue_type=current.issue_type))
+        self.assertFalse(obs.done)
+
+        current = tickets_by_id[obs.current_ticket["ticket_id"]]
+        final_obs = env.step(
+            HelpdeskTicketAction(
+                issue_type=current.issue_type,
+                priority="medium",
+            )
+        )
+
+        self.assertTrue(final_obs.done)
+        self.assertAlmostEqual(final_obs.reward, 0.5, places=9)
+        self.assertAlmostEqual(env.state.total_reward, 0.5, places=9)
+        self.assertAlmostEqual(env.state.reward or 0.0, 0.5, places=9)
 
 
 # ---------------------------------------------------------------------------

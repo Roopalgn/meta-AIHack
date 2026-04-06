@@ -53,6 +53,7 @@ inference:
     - MODEL_NAME
     - HF_TOKEN
     - ENV_URL
+    - TASK_ID
 
 requirements:
   python: ">=3.11"
