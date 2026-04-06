@@ -115,7 +115,7 @@ class HelpdeskTicketRoutingEnvironment(
             f
             for f, v in action.model_dump(exclude_none=True).items()
             if v is not None
-            and f not in {"action_type", "tool_name", "tool_target_ticket_id"}
+            and f not in {"action_type", "tool_name", "tool_target_ticket_id", "metadata"}
         }
         allowed = set(task["allowed_fields"])
         extra_fields = submitted_fields - allowed

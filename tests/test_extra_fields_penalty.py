@@ -132,6 +132,24 @@ class TestExtraFieldsPenalty(unittest.TestCase):
         self.assertEqual(len(result_obs.history), 1)
         self.assertNotIn("penalty_reason", result_obs.history[0])
 
+    def test_action_metadata_is_not_treated_as_extra_field(self) -> None:
+        """OpenEnv Action metadata should not trigger the extra-fields penalty."""
+        env = _make_env()
+        obs = env.reset(seed=42, task_id=1)
+        ticket_id = obs.current_ticket["ticket_id"]
+        current_ticket = env._tickets_by_id[ticket_id]  # noqa: SLF001 - test-only inspection
+
+        result_obs = env.step(
+            HelpdeskTicketAction(
+                issue_type=current_ticket.issue_type,
+                metadata={},
+            )
+        )
+
+        self.assertEqual(len(result_obs.history), 1)
+        self.assertNotIn("penalty_reason", result_obs.history[0])
+        self.assertGreater(result_obs.history[0]["score"], 0.0)
+
     def test_extra_fields_no_exception_raised(self) -> None:
         """Requirement 7.4: extra fields must not raise an unhandled exception."""
         env = _make_env()
