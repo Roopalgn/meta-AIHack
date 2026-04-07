@@ -14,7 +14,7 @@ API_BASE_URL
 
 MODEL_NAME
     Model identifier to use for LLM inference.
-    Default: ``<your-active-model>``
+    Default: ``gpt-4o-mini``
 
 API_KEY
     Proxy/API authentication token injected by the evaluator.
@@ -69,7 +69,7 @@ from vocabulary import (
 # Configuration
 # ---------------------------------------------------------------------------
 DEFAULT_API_BASE_URL = "https://router.huggingface.co/v1"
-DEFAULT_MODEL_NAME = "<your-active-model>"
+DEFAULT_MODEL_NAME = "gpt-4o-mini"
 
 
 def _get_int_env(name: str, default: int) -> int:
@@ -85,12 +85,12 @@ def _get_int_env(name: str, default: int) -> int:
         )
         return default
 
-API_BASE_URL = os.getenv("API_BASE_URL", DEFAULT_API_BASE_URL)
-MODEL_NAME = os.getenv("MODEL_NAME", DEFAULT_MODEL_NAME)
+API_BASE_URL = (os.getenv("API_BASE_URL") or DEFAULT_API_BASE_URL).strip()
+MODEL_NAME = (os.getenv("MODEL_NAME") or DEFAULT_MODEL_NAME).strip()
 HF_TOKEN = os.getenv("HF_TOKEN")
-API_KEY = os.getenv("API_KEY") or HF_TOKEN
+API_KEY = (os.getenv("API_KEY") or HF_TOKEN or "").strip() or None
 LOCAL_IMAGE_NAME = os.getenv("LOCAL_IMAGE_NAME")
-ENV_URL = os.getenv("ENV_URL", "http://localhost:7860")
+ENV_URL = (os.getenv("ENV_URL") or "http://localhost:7860").strip()
 
 SEED = _get_int_env("SEED", 42)
 TASK_ID_ENV = os.getenv("TASK_ID")
@@ -106,7 +106,7 @@ RUN_ALL_TASKS_ENV = os.getenv("RUN_ALL_TASKS", "").strip().lower() in {
 
 
 def llm_mode_enabled() -> bool:
-    return bool(API_KEY) and MODEL_NAME != DEFAULT_MODEL_NAME
+    return bool(API_KEY) and bool(MODEL_NAME)
 
 
 llm_client: OpenAI | None = None

@@ -136,21 +136,17 @@ class InferenceUnitTests(unittest.TestCase):
             inference.API_BASE_URL,
             "https://router.huggingface.co/v1",
         )
-        self.assertEqual(inference.MODEL_NAME, "<your-active-model>")
+        self.assertEqual(inference.MODEL_NAME, "gpt-4o-mini")
         self.assertIsNone(inference.API_KEY)
         self.assertIsNone(inference.HF_TOKEN)
         self.assertFalse(inference.llm_mode_enabled())
 
     def test_api_key_enables_llm_mode_without_hf_token(self) -> None:
-        inference = _load_inference_module(
-            {
-                "API_KEY": "validator-proxy-key",
-                "MODEL_NAME": "meta/test-model",
-            }
-        )
+        inference = _load_inference_module({"API_KEY": "validator-proxy-key"})
 
         self.assertEqual(inference.API_KEY, "validator-proxy-key")
         self.assertIsNone(inference.HF_TOKEN)
+        self.assertEqual(inference.MODEL_NAME, "gpt-4o-mini")
         self.assertTrue(inference.llm_mode_enabled())
 
     def test_seed_env_override_is_respected(self) -> None:
