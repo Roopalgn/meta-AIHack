@@ -945,14 +945,15 @@ def run() -> None:
             if final_rubric_reward is not None
             else (task_step_rewards[-1] if task_step_rewards else 0.0)
         )
+        reported_score = clamp_reported_score(final_reward)
         all_results[task_id] = {
             "final_reward": final_reward,
             "step_count": step_num,
         }
         emit_log(
             "END",
-            final_reward=round(final_reward, 4),
-            score=round(clamp_reported_score(final_reward), 4),
+            final_reward=round(reported_score, 4),
+            score=round(reported_score, 4),
             step_count=step_num,
             task_id=task_id,
             task_name=task["name"],

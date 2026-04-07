@@ -754,13 +754,14 @@ class HelpdeskTicketRoutingEnvironment(
         )
         self._state.last_tool_result = tool_result
         investigation_reward = USEFUL_INVESTIGATION_REWARD if useful_investigation else 0.0
+        investigation_score = clamp_open_unit_interval(0.0)
         self._state.last_step_reward = investigation_reward
         self._state.reward = investigation_reward
         self._state.done = False
         self._state.investigation_penalty_applied = self._compute_episode_penalty()
         progress = self._tool_progress_for_ticket(current_ticket)
         reward_components = self._build_reward_components(
-            ticket_score=0.0,
+            ticket_score=investigation_score,
             field_breakdown={},
             shaped_step_reward=investigation_reward,
             reward_kind="investigation",
@@ -779,7 +780,7 @@ class HelpdeskTicketRoutingEnvironment(
             self._build_history_entry(
                 current_ticket,
                 predicted=action.model_dump(exclude_none=True),
-                score=0.0,
+                score=investigation_score,
                 breakdown={},
                 queue_position=idx + 1,
                 reward=investigation_reward,
