@@ -45,7 +45,7 @@ class GraderUnitTests(unittest.TestCase):
 
         score, breakdown = grade_action(action, ticket, task_id=3)
 
-        self.assertAlmostEqual(score, 1.0)
+        self.assertAlmostEqual(score, 0.999)
         self.assertEqual(
             breakdown,
             {
@@ -81,13 +81,14 @@ class GraderUnitTests(unittest.TestCase):
 
                     score, breakdown = grade_action(action, ticket, task_id=1)
 
-                    expected_score = (
+                    raw_expected_score = (
                         1.0
                         if predicted == expected
                         else ISSUE_TYPE_SIMILARITY.get((predicted, expected), 0.0)
                     )
-                    self.assertAlmostEqual(score, expected_score)
-                    self.assertEqual(breakdown, {"issue_type": expected_score})
+                    expected_task_score = max(0.001, min(0.999, raw_expected_score))
+                    self.assertAlmostEqual(score, expected_task_score)
+                    self.assertEqual(breakdown, {"issue_type": raw_expected_score})
 
     def test_unrelated_issue_type_gets_zero_not_fuzzy_credit(self) -> None:
         ticket = _ticket(issue_type="onboarding")
@@ -95,7 +96,7 @@ class GraderUnitTests(unittest.TestCase):
 
         score, breakdown = grade_action(action, ticket, task_id=1)
 
-        self.assertAlmostEqual(score, 0.0)
+        self.assertAlmostEqual(score, 0.001)
         self.assertEqual(breakdown, {"issue_type": 0.0})
 
     def test_priority_scoring_uses_defined_proximity_table(self) -> None:
@@ -129,7 +130,9 @@ class GraderUnitTests(unittest.TestCase):
                         breakdown,
                         {"issue_type": 1.0, "priority": priority_score},
                     )
-                    self.assertAlmostEqual(score, 0.6 + 0.4 * priority_score)
+                    raw_score = 0.6 + 0.4 * priority_score
+                    expected_task_score = max(0.001, min(0.999, raw_score))
+                    self.assertAlmostEqual(score, expected_task_score)
 
     def test_task_2_weights_apply_as_documented(self) -> None:
         ticket = _ticket(priority="high")

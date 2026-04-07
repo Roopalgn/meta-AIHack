@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from models import HelpdeskTicketAction, HelpdeskTicketRecord
 
+TASK_SCORE_EPSILON = 0.001
+
 
 ISSUE_TYPE_SIMILARITY = {
     ("billing_license", "service_request"): 0.4,
@@ -98,6 +100,7 @@ def grade_action(
     }
 
     weights = TASK_WEIGHTS[task_id]
-    score = sum(field_scores[field] * weight for field, weight in weights.items())
+    raw_score = sum(field_scores[field] * weight for field, weight in weights.items())
+    score = max(TASK_SCORE_EPSILON, min(1.0 - TASK_SCORE_EPSILON, raw_score))
     breakdown = {field: field_scores[field] for field in weights}
     return score, breakdown

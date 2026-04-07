@@ -746,9 +746,9 @@ class TestTerminalInvalidActionFinalReward(unittest.TestCase):
         )
 
         self.assertTrue(final_obs.done)
-        self.assertAlmostEqual(final_obs.reward, 0.5, places=9)
-        self.assertAlmostEqual(env.state.total_reward, 0.5, places=9)
-        self.assertAlmostEqual(env.state.reward or 0.0, 0.5, places=9)
+        self.assertAlmostEqual(final_obs.reward, 0.4995, places=9)
+        self.assertAlmostEqual(env.state.total_reward, 0.4995, places=9)
+        self.assertAlmostEqual(env.state.reward or 0.0, 0.4995, places=9)
 
 
 # ---------------------------------------------------------------------------
