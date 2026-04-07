@@ -196,8 +196,9 @@ class HelpdeskTicketRoutingEnvironment(
         allowed = set(task["allowed_fields"])
         extra_fields = submitted_fields - allowed
         if extra_fields:
-            # Penalty: record score 0.0, advance index, return penalty observation
-            self._state.per_ticket_scores.append(0.0)
+            # Penalty: record an open-interval score, advance index, return penalty observation
+            invalid_score = clamp_open_unit_interval(0.0)
+            self._state.per_ticket_scores.append(invalid_score)
             self._state.average_score_so_far = self._current_average_score()
             self._state.step_count += 1
             self._state.current_ticket_index += 1
@@ -219,7 +220,7 @@ class HelpdeskTicketRoutingEnvironment(
             else:
                 final_reward = 0.0
             reward_components = self._build_reward_components(
-                ticket_score=0.0,
+                ticket_score=invalid_score,
                 field_breakdown={},
                 shaped_step_reward=0.0,
                 reward_kind="trajectory" if is_done else "step_penalty",
@@ -249,7 +250,7 @@ class HelpdeskTicketRoutingEnvironment(
                 self._build_history_entry(
                     current_ticket,
                     predicted=action.model_dump(exclude_none=True),
-                    score=0.0,
+                    score=invalid_score,
                     breakdown={},
                     queue_position=idx + 1,
                     reward=final_reward,

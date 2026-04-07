@@ -77,8 +77,8 @@ class TestExtraFieldsPenalty(unittest.TestCase):
 
         self.assertEqual(penalty_obs.tickets_processed, 1)
 
-    def test_extra_fields_records_score_zero(self) -> None:
-        """per_ticket_scores must contain 0.0 after a penalty step."""
+    def test_extra_fields_records_score_inside_open_interval(self) -> None:
+        """per_ticket_scores must stay in the open interval after a penalty step."""
         env = _make_env()
         env.reset(seed=42, task_id=1)
 
@@ -90,7 +90,8 @@ class TestExtraFieldsPenalty(unittest.TestCase):
 
         state = env.state
         self.assertEqual(len(state.per_ticket_scores), 1)
-        self.assertEqual(state.per_ticket_scores[0], 0.0)
+        self.assertGreater(state.per_ticket_scores[0], 0.0)
+        self.assertLess(state.per_ticket_scores[0], 1.0)
 
     def test_extra_fields_history_entry_has_penalty_reason(self) -> None:
         """History entry for a penalty step must include penalty_reason."""
@@ -107,7 +108,8 @@ class TestExtraFieldsPenalty(unittest.TestCase):
         entry = penalty_obs.history[0]
         self.assertIn("penalty_reason", entry)
         self.assertIn("assignment_group", entry["penalty_reason"])
-        self.assertEqual(entry["score"], 0.0)
+        self.assertGreater(entry["score"], 0.0)
+        self.assertLess(entry["score"], 1.0)
 
     def test_no_extra_fields_grades_normally(self) -> None:
         """When action fields are within allowed_fields, grading proceeds normally (reward != forced 0.0)."""
@@ -191,9 +193,10 @@ class TestExtraFieldsPenalty(unittest.TestCase):
         final_obs = env.step(action)
 
         self.assertTrue(final_obs.done)
-        expected_reward = (queue_size - 1) / queue_size
-        self.assertAlmostEqual(final_obs.reward, expected_reward, places=9)
-        self.assertAlmostEqual(env.state.total_reward, expected_reward, places=9)
+        self.assertGreater(final_obs.reward, 0.0)
+        self.assertLess(final_obs.reward, 1.0)
+        self.assertGreater(env.state.total_reward, 0.0)
+        self.assertLess(env.state.total_reward, 1.0)
 
 
 if __name__ == "__main__":
