@@ -47,7 +47,7 @@ class GraderUnitTests(unittest.TestCase):
 
         score, breakdown = grade_action(action, ticket, task_id=3)
 
-        self.assertAlmostEqual(score, 0.99)
+        self.assertAlmostEqual(score, 1.0)
         self.assertEqual(
             breakdown,
             {
@@ -88,7 +88,7 @@ class GraderUnitTests(unittest.TestCase):
                         if predicted == expected
                         else ISSUE_TYPE_SIMILARITY.get((predicted, expected), 0.0)
                     )
-                    expected_task_score = max(0.01, min(0.99, raw_expected_score))
+                    expected_task_score = max(0.0, min(1.0, raw_expected_score))
                     self.assertAlmostEqual(score, expected_task_score)
                     self.assertEqual(breakdown, {"issue_type": raw_expected_score})
 
@@ -98,7 +98,7 @@ class GraderUnitTests(unittest.TestCase):
 
         score, breakdown = grade_action(action, ticket, task_id=1)
 
-        self.assertAlmostEqual(score, 0.01)
+        self.assertAlmostEqual(score, 0.0)
         self.assertEqual(breakdown, {"issue_type": 0.0})
 
     def test_priority_scoring_uses_defined_proximity_table(self) -> None:
@@ -133,7 +133,7 @@ class GraderUnitTests(unittest.TestCase):
                         {"issue_type": 1.0, "priority": priority_score},
                     )
                     raw_score = 0.6 + 0.4 * priority_score
-                    expected_task_score = max(0.01, min(0.99, raw_score))
+                    expected_task_score = max(0.0, min(1.0, raw_score))
                     self.assertAlmostEqual(score, expected_task_score)
 
     def test_task_2_weights_apply_as_documented(self) -> None:
@@ -195,6 +195,42 @@ class GraderUnitTests(unittest.TestCase):
         )
         self.assertAlmostEqual(score, 0.65)
 
+    def test_alternate_route_can_win_when_primary_route_is_worse(self) -> None:
+        ticket = HelpdeskTicketRecord(
+            ticket_id="ticket-alt",
+            title="Planning ticket",
+            requester="planner@example.com",
+            description="Capacity-sensitive routing decision.",
+            issue_type="service_request",
+            priority="medium",
+            assignment_group="procurement",
+            resolution_action="assign",
+            alternate_issue_type="billing_license",
+            alternate_priority="high",
+            alternate_assignment_group="license_ops",
+            alternate_resolution_action="fulfill",
+            alternate_route_score_multiplier=0.85,
+        )
+        action = HelpdeskTicketAction(
+            issue_type="billing_license",
+            priority="high",
+            assignment_group="license_ops",
+            resolution_action="fulfill",
+        )
+
+        score, breakdown = grade_action(action, ticket, task_id=3)
+
+        self.assertAlmostEqual(score, 0.85)
+        self.assertEqual(
+            breakdown,
+            {
+                "issue_type": 0.85,
+                "priority": 0.85,
+                "assignment_group": 0.85,
+                "resolution_action": 0.85,
+            },
+        )
+
     def test_resolution_action_partial_credit_uses_declared_similarity_table(self) -> None:
         ticket = _ticket()
         action = HelpdeskTicketAction(
@@ -252,7 +288,7 @@ class GraderUnitTests(unittest.TestCase):
                         },
                     )
                     raw_score = 0.35 + 0.20 + 0.25 * assignment_group_score + 0.20
-                    expected_task_score = max(0.01, min(0.99, raw_score))
+                    expected_task_score = max(0.0, min(1.0, raw_score))
                     self.assertAlmostEqual(score, expected_task_score)
 
     def test_resolution_action_scoring_matches_declared_similarity_table_exhaustively(self) -> None:
@@ -284,7 +320,7 @@ class GraderUnitTests(unittest.TestCase):
                         },
                     )
                     raw_score = 0.35 + 0.20 + 0.25 + 0.20 * resolution_action_score
-                    expected_task_score = max(0.01, min(0.99, raw_score))
+                    expected_task_score = max(0.0, min(1.0, raw_score))
                     self.assertAlmostEqual(score, expected_task_score)
 
     def test_partial_credit_tables_never_override_exact_match(self) -> None:

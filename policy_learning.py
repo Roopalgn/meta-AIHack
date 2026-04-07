@@ -88,6 +88,7 @@ AVAILABLE_TOOLS = (
     "lookup_related_ticket",
     "lookup_requester_history",
     "lookup_internal_routing_note",
+    "lookup_queue_capacity_forecast",
 )
 
 
@@ -229,6 +230,11 @@ def default_submit_builder(
     inference = importlib.import_module("inference")
     candidate = inference.heuristic_action(ticket, allowed_fields)
     candidate, _ = inference.apply_domain_overrides(ticket, candidate, allowed_fields)
+    candidate, _ = inference.apply_capacity_planning_overrides(
+        ticket,
+        candidate,
+        allowed_fields,
+    )
     return HelpdeskTicketAction(**candidate)
 
 
@@ -237,7 +243,11 @@ def _routing_text(ticket: dict[str, Any]) -> str:
         str(ticket.get("title", "")),
         str(ticket.get("description", "")),
         str(ticket.get("ambiguity_note", "")),
+        str(ticket.get("planning_note", "")),
         json.dumps(ticket.get("last_tool_result") or {}, sort_keys=True),
+        json.dumps(ticket.get("routing_options") or [], sort_keys=True),
+        json.dumps(ticket.get("capacity_state") or {}, sort_keys=True),
+        json.dumps(ticket.get("future_queue_demand") or {}, sort_keys=True),
     ]
     related_preview = ticket.get("related_ticket_preview") or {}
     parts.extend(
@@ -251,6 +261,24 @@ def _routing_text(ticket: dict[str, Any]) -> str:
 
 def infer_ticket_cue(ticket: dict[str, Any]) -> str:
     text = _routing_text(ticket)
+    context_status = ticket.get("context_status") or {}
+    if (
+        ticket.get("planning_note")
+        or ticket.get("routing_options")
+        or "lookup_queue_capacity_forecast"
+        in (context_status.get("recommended_tools") or [])
+        or any(
+            phrase in text
+            for phrase in (
+                "capacity",
+                "saturated",
+                "backlog",
+                "resource pressure",
+                "alternate route",
+            )
+        )
+    ):
+        return "capacity_planning"
     if any(
         phrase in text
         for phrase in ("re:", "follow-up", "following up", "regression", "reference ticket", "third update")
@@ -297,14 +325,20 @@ def preferred_tool_order(
     hidden_context_remaining: bool,
 ) -> list[str]:
     text = _routing_text(ticket)
+    context_status = ticket.get("context_status") or {}
     last_tool_result = ticket.get("last_tool_result") or {}
     last_tool_name = str(last_tool_result.get("tool_name", "") or "")
+    recommended_tools = list(context_status.get("recommended_tools") or [])
 
     preferred_tools: list[str] = []
+    if "lookup_queue_capacity_forecast" in recommended_tools:
+        preferred_tools.append("lookup_queue_capacity_forecast")
     if last_tool_name == "lookup_related_ticket":
         preferred_tools.append("lookup_requester_history")
     if last_tool_name == "lookup_requester_history":
         preferred_tools.append("lookup_internal_routing_note")
+    if last_tool_name == "lookup_internal_routing_note":
+        preferred_tools.append("lookup_queue_capacity_forecast")
 
     if any(
         phrase in text
@@ -336,9 +370,15 @@ def preferred_tool_order(
     ):
         preferred_tools.append("lookup_requester_history")
 
+    if infer_ticket_cue(ticket) == "capacity_planning":
+        preferred_tools.append("lookup_queue_capacity_forecast")
+
+    preferred_tools.extend(recommended_tools)
+
     if hidden_context_remaining:
         preferred_tools.extend(
             [
+                "lookup_queue_capacity_forecast",
                 "lookup_internal_routing_note",
                 "lookup_related_ticket",
                 "lookup_requester_history",
@@ -545,6 +585,8 @@ def rollout_episode(
         "terminal_reward": terminal_reward,
         "terminal_rubric_reward": terminal_rubric_reward,
         "average_ticket_score": env.state.average_score_so_far,
+        "planning_penalty_total": env.state.planning_penalty_total,
+        "capacity_pressure_tickets_resolved": env.state.capacity_pressure_tickets_resolved,
         "per_ticket_scores": list(env.state.per_ticket_scores),
     }
     if adaptive_bandit is not None and policy.strategy == "adaptive":
@@ -583,6 +625,15 @@ def summarize_policy_episodes(
             "avg_terminal_rubric_reward": _safe_mean(
                 [float(episode["terminal_rubric_reward"]) for episode in task_episodes]
             ),
+            "avg_planning_penalty_total": _safe_mean(
+                [float(episode["planning_penalty_total"]) for episode in task_episodes]
+            ),
+            "avg_capacity_pressure_tickets_resolved": _safe_mean(
+                [
+                    float(episode["capacity_pressure_tickets_resolved"])
+                    for episode in task_episodes
+                ]
+            ),
             "avg_investigation_steps": _safe_mean(
                 [float(episode["investigation_steps"]) for episode in task_episodes]
             ),
@@ -603,6 +654,15 @@ def summarize_policy_episodes(
         ),
         "avg_terminal_rubric_reward": _safe_mean(
             [float(episode["terminal_rubric_reward"]) for episode in episode_summaries]
+        ),
+        "avg_planning_penalty_total": _safe_mean(
+            [float(episode["planning_penalty_total"]) for episode in episode_summaries]
+        ),
+        "avg_capacity_pressure_tickets_resolved": _safe_mean(
+            [
+                float(episode["capacity_pressure_tickets_resolved"])
+                for episode in episode_summaries
+            ]
         ),
         "avg_investigation_steps": _safe_mean(
             [float(episode["investigation_steps"]) for episode in episode_summaries]
@@ -653,11 +713,12 @@ def evaluate_policy(
     return result
 
 
-def _selection_tuple(summary: dict[str, Any]) -> tuple[float, float, float, float]:
+def _selection_tuple(summary: dict[str, Any]) -> tuple[float, float, float, float, float]:
     return (
-        float(summary["avg_normalized_return"]),
-        float(summary["avg_terminal_reward"]),
         float(summary["avg_terminal_rubric_reward"]),
+        -float(summary["avg_planning_penalty_total"]),
+        float(summary["avg_episode_return"]),
+        float(summary["avg_normalized_return"]),
         -float(summary["avg_investigation_steps"]),
     )
 
@@ -713,7 +774,7 @@ def compare_policies(
         "mode": "compare",
         "task_ids": task_ids,
         "seeds": seeds,
-        "selection_metric": "avg_normalized_return",
+        "selection_metric": "avg_terminal_rubric_reward_then_lower_planning_penalty",
         "baseline_policy": baseline_run["policy"],
         "best_policy": best_run["policy"],
         "improvement_vs_baseline": {
@@ -730,6 +791,11 @@ def compare_policies(
                 best_run["summary"],
                 baseline_run["summary"],
                 "avg_terminal_rubric_reward",
+            ),
+            "avg_planning_penalty_total": _delta(
+                best_run["summary"],
+                baseline_run["summary"],
+                "avg_planning_penalty_total",
             ),
         },
         "policy_summaries": [run["summary"] for run in policy_runs],
@@ -825,7 +891,7 @@ def search_policies(
         "task_ids": task_ids,
         "train_seeds": train_seeds,
         "eval_seeds": eval_seeds,
-        "selection_metric": "avg_normalized_return",
+        "selection_metric": "avg_terminal_rubric_reward_then_lower_planning_penalty",
         "candidate_policies": [policy.name for policy in candidate_policies],
         "selected_policy": selected_policy.name,
         "baseline_policy": baseline_policy.name,
@@ -855,6 +921,11 @@ def search_policies(
                 eval_selected["summary"],
                 eval_baseline["summary"],
                 "avg_terminal_rubric_reward",
+            ),
+            "avg_planning_penalty_total": _delta(
+                eval_selected["summary"],
+                eval_baseline["summary"],
+                "avg_planning_penalty_total",
             ),
         },
         "artifacts": {
@@ -975,6 +1046,7 @@ def _print_summary(label: str, summary: dict[str, Any]) -> None:
                     "avg_normalized_return": summary["avg_normalized_return"],
                     "avg_terminal_reward": summary["avg_terminal_reward"],
                     "avg_terminal_rubric_reward": summary["avg_terminal_rubric_reward"],
+                    "avg_planning_penalty_total": summary["avg_planning_penalty_total"],
                     "avg_investigation_steps": summary["avg_investigation_steps"],
                 }
             },

@@ -2,9 +2,6 @@ from __future__ import annotations
 
 from models import HelpdeskTicketAction, HelpdeskTicketRecord
 
-TASK_SCORE_EPSILON = 0.01
-
-
 ISSUE_TYPE_SIMILARITY = {
     ("billing_license", "service_request"): 0.4,
     ("service_request", "billing_license"): 0.4,
@@ -120,6 +117,52 @@ def _score_exact(predicted: str | None, expected: str) -> float:
     return 1.0 if _normalized(predicted) == _normalized(expected) and predicted else 0.0
 
 
+def _score_route(
+    action: HelpdeskTicketAction,
+    *,
+    issue_type: str,
+    priority: str,
+    assignment_group: str,
+    resolution_action: str,
+    score_multiplier: float,
+    task_id: int,
+) -> tuple[float, dict[str, float]]:
+    field_scores = {
+        "issue_type": _score_exact_or_similar(action.issue_type, issue_type),
+        "priority": _score_priority(action.priority, priority),
+        "assignment_group": _score_exact_or_table(
+            action.assignment_group,
+            assignment_group,
+            ASSIGNMENT_GROUP_SIMILARITY,
+        ),
+        "resolution_action": _score_exact_or_table(
+            action.resolution_action,
+            resolution_action,
+            RESOLUTION_ACTION_SIMILARITY,
+        ),
+    }
+    if score_multiplier != 1.0:
+        field_scores = {
+            field: round(score * score_multiplier, 4)
+            for field, score in field_scores.items()
+        }
+    weights = TASK_WEIGHTS[task_id]
+    raw_score = sum(field_scores[field] * weight for field, weight in weights.items())
+    return raw_score, field_scores
+
+
+def _alternate_route_available(ticket: HelpdeskTicketRecord) -> bool:
+    return any(
+        value is not None
+        for value in (
+            ticket.alternate_issue_type,
+            ticket.alternate_priority,
+            ticket.alternate_assignment_group,
+            ticket.alternate_resolution_action,
+        )
+    ) and ticket.alternate_route_score_multiplier > 0.0
+
+
 def grade_action(
     action: HelpdeskTicketAction,
     ticket: HelpdeskTicketRecord,
@@ -128,23 +171,36 @@ def grade_action(
     if task_id not in TASK_WEIGHTS:
         raise ValueError(f"Unsupported task_id: {task_id}")
 
-    field_scores = {
-        "issue_type": _score_exact_or_similar(action.issue_type, ticket.issue_type),
-        "priority": _score_priority(action.priority, ticket.priority),
-        "assignment_group": _score_exact_or_table(
-            action.assignment_group,
-            ticket.assignment_group,
-            ASSIGNMENT_GROUP_SIMILARITY,
-        ),
-        "resolution_action": _score_exact_or_table(
-            action.resolution_action,
-            ticket.resolution_action,
-            RESOLUTION_ACTION_SIMILARITY,
-        ),
-    }
+    primary_score, primary_field_scores = _score_route(
+        action,
+        issue_type=ticket.issue_type,
+        priority=ticket.priority,
+        assignment_group=ticket.assignment_group,
+        resolution_action=ticket.resolution_action,
+        score_multiplier=1.0,
+        task_id=task_id,
+    )
+    chosen_score = primary_score
+    chosen_field_scores = primary_field_scores
 
-    weights = TASK_WEIGHTS[task_id]
-    raw_score = sum(field_scores[field] * weight for field, weight in weights.items())
-    score = max(TASK_SCORE_EPSILON, min(1.0 - TASK_SCORE_EPSILON, raw_score))
-    breakdown = {field: field_scores[field] for field in weights}
+    if _alternate_route_available(ticket):
+        alternate_score, alternate_field_scores = _score_route(
+            action,
+            issue_type=ticket.alternate_issue_type or ticket.issue_type,
+            priority=ticket.alternate_priority or ticket.priority,
+            assignment_group=(
+                ticket.alternate_assignment_group or ticket.assignment_group
+            ),
+            resolution_action=(
+                ticket.alternate_resolution_action or ticket.resolution_action
+            ),
+            score_multiplier=ticket.alternate_route_score_multiplier,
+            task_id=task_id,
+        )
+        if alternate_score > chosen_score:
+            chosen_score = alternate_score
+            chosen_field_scores = alternate_field_scores
+
+    score = max(0.0, min(1.0, chosen_score))
+    breakdown = {field: chosen_field_scores[field] for field in TASK_WEIGHTS[task_id]}
     return score, breakdown

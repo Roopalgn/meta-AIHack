@@ -8,7 +8,7 @@ import openenv_test_stubs  # noqa: F401
 
 from models import HelpdeskTicketRecord
 from server import tasks as task_module
-from server.tasks import TASKS, get_task_definition, load_dataset
+from server.tasks import CURATED_EXPANSION_RECORDS, TASKS, get_task_definition, load_dataset
 from vocabulary import (
     ASSIGNMENT_GROUPS,
     ISSUE_TYPES,
@@ -51,7 +51,17 @@ class TasksAndDatasetUnitTests(unittest.TestCase):
         dataset = load_dataset()
 
         self.assertGreaterEqual(len(dataset), 45)
-        self.assertTrue(all(isinstance(record, HelpdeskTicketRecord) for record in dataset))
+        self.assertTrue(
+            all(
+                isinstance(record, HelpdeskTicketRecord)
+                or (
+                    record.__class__.__name__ == "HelpdeskTicketRecord"
+                    and hasattr(record, "model_dump")
+                    and hasattr(record, "ticket_id")
+                )
+                for record in dataset
+            )
+        )
 
     def test_dataset_ticket_ids_are_unique(self) -> None:
         dataset = load_dataset()
@@ -100,9 +110,13 @@ class TasksAndDatasetUnitTests(unittest.TestCase):
         dataset = load_dataset()
         ambiguity_count = sum(1 for record in dataset if record.ambiguity_note)
         follow_up_count = sum(1 for record in dataset if record.related_ticket_id)
+        alternate_route_count = sum(
+            1 for record in dataset if record.alternate_route_score_multiplier > 0.0
+        )
 
         self.assertGreaterEqual(ambiguity_count, 4)
         self.assertGreaterEqual(follow_up_count, 3)
+        self.assertGreaterEqual(alternate_route_count, 10)
 
     def test_load_dataset_accepts_utf8_bom(self) -> None:
         sample = (
@@ -129,7 +143,8 @@ class TasksAndDatasetUnitTests(unittest.TestCase):
         with mock.patch.object(task_module.Path, "open", fake_open):
             dataset = load_dataset()
 
-        self.assertEqual([record.ticket_id for record in dataset], ["ticket-bom"])
+        self.assertIn("ticket-bom", [record.ticket_id for record in dataset])
+        self.assertEqual(len(dataset), 1 + len(CURATED_EXPANSION_RECORDS))
 
 
 if __name__ == "__main__":

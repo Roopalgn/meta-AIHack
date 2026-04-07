@@ -31,6 +31,7 @@ AVAILABLE_TOOLS = (
     "lookup_related_ticket",
     "lookup_requester_history",
     "lookup_internal_routing_note",
+    "lookup_queue_capacity_forecast",
 )
 FREE_INVESTIGATIONS_PER_TICKET = 1
 EXTRA_INVESTIGATION_COST = 0.04
@@ -44,6 +45,10 @@ PRIORITY_UNDERSHOOT_PENALTY = 0.03
 SEVERE_PRIORITY_UNDERSHOOT_PENALTY = 0.07
 DANGEROUS_RESOLUTION_PENALTY = 0.05
 NONDEFAULT_ROUTING_FOLLOWTHROUGH_BONUS = 0.02
+TEAM_CAPACITY_OVERFLOW_PENALTY = 0.08
+HIGH_PRIORITY_SLOT_OVERFLOW_PENALTY = 0.06
+ESCALATION_SLOT_OVERFLOW_PENALTY = 0.05
+PLANNING_SUCCESS_BONUS = 0.05
 
 TASK3_INVESTIGATION_TOOL_PLAN: dict[str, tuple[str, ...]] = {
     "ticket-021": ("lookup_related_ticket", "lookup_requester_history"),
@@ -161,6 +166,11 @@ class HelpdeskTicketRoutingEnvironment(
         else:
             queue_size = min(queue_size_value, len(self._dataset))
         self._queue = self._rng.sample(self._dataset, min(queue_size, len(self._dataset)))
+        (
+            team_capacity_initial,
+            high_priority_slots_initial,
+            escalation_slots_initial,
+        ) = self._initial_capacity_state_for_queue(task_id)
 
         self._state = HelpdeskTicketState(
             episode_id=episode_id or str(uuid.uuid4()),
@@ -174,8 +184,17 @@ class HelpdeskTicketRoutingEnvironment(
             average_score_so_far=0.0,
             investigation_budget_remaining=queue_size * FREE_INVESTIGATIONS_PER_TICKET,
             investigation_penalty_applied=0.0,
+            planning_penalty_applied=0.0,
             last_reward_components={},
             ticket_tool_usage={},
+            team_capacity_initial=team_capacity_initial,
+            team_capacity_remaining=dict(team_capacity_initial),
+            high_priority_slots_initial=high_priority_slots_initial,
+            high_priority_slots_remaining=high_priority_slots_initial,
+            escalation_slots_initial=escalation_slots_initial,
+            escalation_slots_remaining=escalation_slots_initial,
+            planning_penalty_total=0.0,
+            capacity_pressure_tickets_resolved=0,
         )
 
         return self._build_observation(task)
@@ -298,6 +317,10 @@ class HelpdeskTicketRoutingEnvironment(
             action,
             task_id=task_id,
         )
+        capacity_penalty, capacity_details = self._apply_capacity_usage(
+            current_ticket,
+            action,
+        )
         step_adjustments = compute_step_adjustments(
             score,
             previous_average=previous_average,
@@ -321,11 +344,17 @@ class HelpdeskTicketRoutingEnvironment(
                 self._state.per_ticket_scores,
                 len(self._queue),
                 self._state.step_count,
-                completion_bonus=self._trajectory_consistency_bonus(),
+                completion_bonus=(
+                    self._trajectory_consistency_bonus() + self._planning_success_bonus()
+                ),
             )
             trajectory_reward = trajectory_components["final_reward"]
-            rubric_reward = self._apply_episode_economics(trajectory_reward)
-            final_reward = clamp_open_unit_interval(rubric_reward - context_penalty)
+            rubric_reward = self._apply_episode_economics(
+                trajectory_reward - self._state.planning_penalty_total
+            )
+            final_reward = clamp_open_unit_interval(
+                rubric_reward - context_penalty - capacity_penalty
+            )
             self._state.total_reward = rubric_reward
             investigation_penalty = self._compute_episode_penalty()
         else:
@@ -333,7 +362,9 @@ class HelpdeskTicketRoutingEnvironment(
             self._state.average_score_so_far = self._current_average_score()
             self._state.step_count += 1
             self._state.current_ticket_index += 1
-            final_reward = clamp_open_unit_interval(step_reward - context_penalty)
+            final_reward = clamp_open_unit_interval(
+                step_reward - context_penalty - capacity_penalty
+            )
 
         reward_components = self._build_reward_components(
             ticket_score=score,
@@ -348,12 +379,18 @@ class HelpdeskTicketRoutingEnvironment(
                 "context_gap_penalty": context_penalty,
                 "context_completion_bonus": process_bonus,
                 "risk_penalty": risk_penalty,
+                "capacity_penalty": capacity_penalty,
                 "delta_adjustment": step_adjustments["delta_adjustment"],
                 "required_investigation_count": len(self._required_tools_for_ticket(current_ticket)),
                 "hidden_context_remaining_count": missing_required_count,
                 "hidden_context_revealed_count": len(
                     self._used_tools_for_ticket(current_ticket.ticket_id)
                 ),
+                "planning_penalty_total": self._state.planning_penalty_total,
+                "planning_penalty_applied": self._state.planning_penalty_applied,
+                "planning_success_bonus": self._planning_success_bonus()
+                if is_done
+                else 0.0,
                 "rubric_reward": rubric_reward,
                 "trajectory_average_reward": (
                     trajectory_components["average_reward"]
@@ -372,6 +409,7 @@ class HelpdeskTicketRoutingEnvironment(
                 ),
             },
         )
+        reward_components.update(capacity_details)
 
         history_entry = self._build_history_entry(
             current_ticket,
@@ -390,6 +428,7 @@ class HelpdeskTicketRoutingEnvironment(
         self._state.reward = final_reward
         self._state.done = is_done
         self._state.investigation_penalty_applied = self._compute_episode_penalty()
+        self._state.planning_penalty_applied = capacity_penalty
         self._state.last_tool_result = None
         self._state.last_reward_components = reward_components
 
@@ -425,14 +464,373 @@ class HelpdeskTicketRoutingEnvironment(
             return 0.0
         return sum(self._state.per_ticket_scores) / len(self._state.per_ticket_scores)
 
+    def _ticket_has_alternate_route(self, ticket: HelpdeskTicketRecord) -> bool:
+        return any(
+            value is not None
+            for value in (
+                ticket.alternate_issue_type,
+                ticket.alternate_priority,
+                ticket.alternate_assignment_group,
+                ticket.alternate_resolution_action,
+            )
+        ) and ticket.alternate_route_score_multiplier > 0.0
+
+    def _route_for_ticket(
+        self,
+        ticket: HelpdeskTicketRecord,
+        *,
+        use_alternate: bool = False,
+    ) -> dict[str, str]:
+        if use_alternate and self._ticket_has_alternate_route(ticket):
+            return {
+                "issue_type": ticket.alternate_issue_type or ticket.issue_type,
+                "priority": ticket.alternate_priority or ticket.priority,
+                "assignment_group": (
+                    ticket.alternate_assignment_group or ticket.assignment_group
+                ),
+                "resolution_action": (
+                    ticket.alternate_resolution_action or ticket.resolution_action
+                ),
+            }
+        return {
+            "issue_type": ticket.issue_type,
+            "priority": ticket.priority,
+            "assignment_group": ticket.assignment_group,
+            "resolution_action": ticket.resolution_action,
+        }
+
+    def _route_for_action(
+        self,
+        ticket: HelpdeskTicketRecord,
+        action: HelpdeskTicketAction,
+    ) -> dict[str, str]:
+        primary_route = self._route_for_ticket(ticket)
+        return {
+            "issue_type": action.issue_type or primary_route["issue_type"],
+            "priority": action.priority or primary_route["priority"],
+            "assignment_group": (
+                action.assignment_group or primary_route["assignment_group"]
+            ),
+            "resolution_action": (
+                action.resolution_action or primary_route["resolution_action"]
+            ),
+        }
+
+    def _route_capacity_cost(self, route: dict[str, str]) -> dict[str, Any]:
+        return {
+            "assignment_group": route["assignment_group"],
+            "team_slots": 1,
+            "high_priority_slots": 1
+            if route["priority"] in {"high", "critical"}
+            else 0,
+            "escalation_slots": 1
+            if route["resolution_action"] in {"assign", "escalate"}
+            else 0,
+        }
+
+    def _routing_options_for_ticket(self, ticket: HelpdeskTicketRecord) -> list[dict[str, Any]]:
+        options = [
+            {
+                "label": "primary",
+                "score_multiplier": 1.0,
+                **self._route_for_ticket(ticket),
+                "capacity_cost": self._route_capacity_cost(self._route_for_ticket(ticket)),
+            }
+        ]
+        if self._ticket_has_alternate_route(ticket):
+            alternate_route = self._route_for_ticket(ticket, use_alternate=True)
+            options.append(
+                {
+                    "label": "alternate",
+                    "score_multiplier": ticket.alternate_route_score_multiplier,
+                    **alternate_route,
+                    "capacity_cost": self._route_capacity_cost(alternate_route),
+                }
+            )
+        return options
+
+    def _initial_capacity_state_for_queue(
+        self,
+        task_id: int,
+    ) -> tuple[dict[str, int], int, int]:
+        if task_id != 3:
+            return {}, 0, 0
+
+        primary_group_demand: dict[str, int] = {}
+        alternate_relief_by_group: dict[str, int] = {}
+        all_groups: set[str] = set()
+        high_priority_demand = 0
+        high_priority_relief = 0
+        escalation_demand = 0
+        escalation_relief = 0
+
+        for ticket in self._queue:
+            primary_route = self._route_for_ticket(ticket)
+            all_groups.add(primary_route["assignment_group"])
+            primary_group_demand[primary_route["assignment_group"]] = (
+                primary_group_demand.get(primary_route["assignment_group"], 0) + 1
+            )
+            if primary_route["priority"] in {"high", "critical"}:
+                high_priority_demand += 1
+            if primary_route["resolution_action"] in {"assign", "escalate"}:
+                escalation_demand += 1
+
+            if self._ticket_has_alternate_route(ticket):
+                alternate_route = self._route_for_ticket(ticket, use_alternate=True)
+                all_groups.add(alternate_route["assignment_group"])
+                if alternate_route["assignment_group"] != primary_route["assignment_group"]:
+                    alternate_relief_by_group[primary_route["assignment_group"]] = (
+                        alternate_relief_by_group.get(
+                            primary_route["assignment_group"],
+                            0,
+                        )
+                        + 1
+                    )
+                if (
+                    primary_route["priority"] in {"high", "critical"}
+                    and alternate_route["priority"] not in {"high", "critical"}
+                ):
+                    high_priority_relief += 1
+                if (
+                    primary_route["resolution_action"] in {"assign", "escalate"}
+                    and alternate_route["resolution_action"] not in {"assign", "escalate"}
+                ):
+                    escalation_relief += 1
+
+        team_capacity_initial: dict[str, int] = {}
+        for group in sorted(all_groups):
+            demand = primary_group_demand.get(group, 0)
+            relief = alternate_relief_by_group.get(group, 0)
+            if demand <= 1:
+                team_capacity_initial[group] = 1 if group in all_groups else 0
+            elif relief > 0:
+                team_capacity_initial[group] = max(1, demand - 1)
+            else:
+                team_capacity_initial[group] = demand
+
+        if high_priority_demand <= 1:
+            high_priority_slots_initial = high_priority_demand
+        elif high_priority_relief > 0:
+            high_priority_slots_initial = max(1, high_priority_demand - 1)
+        else:
+            high_priority_slots_initial = high_priority_demand
+
+        if escalation_demand <= 1:
+            escalation_slots_initial = escalation_demand
+        elif escalation_relief > 0:
+            escalation_slots_initial = max(1, escalation_demand - 1)
+        else:
+            escalation_slots_initial = escalation_demand
+
+        return (
+            team_capacity_initial,
+            high_priority_slots_initial,
+            escalation_slots_initial,
+        )
+
+    def _future_queue_demand(self) -> dict[str, Any]:
+        future_tickets = self._queue[self._state.current_ticket_index + 1 :]
+        team_demand: dict[str, int] = {}
+        high_priority_needed = 0
+        escalation_needed = 0
+        capacity_sensitive_tickets = 0
+
+        for ticket in future_tickets:
+            route = self._route_for_ticket(ticket)
+            team_demand[route["assignment_group"]] = (
+                team_demand.get(route["assignment_group"], 0) + 1
+            )
+            if route["priority"] in {"high", "critical"}:
+                high_priority_needed += 1
+            if route["resolution_action"] in {"assign", "escalate"}:
+                escalation_needed += 1
+            if self._ticket_has_alternate_route(ticket):
+                capacity_sensitive_tickets += 1
+
+        return {
+            "remaining_ticket_count": len(future_tickets),
+            "team_demand": team_demand,
+            "high_priority_needed": high_priority_needed,
+            "escalation_needed": escalation_needed,
+            "capacity_sensitive_tickets": capacity_sensitive_tickets,
+        }
+
+    def _capacity_state_snapshot(self) -> dict[str, Any]:
+        return {
+            "team_capacity_remaining": dict(self._state.team_capacity_remaining),
+            "team_capacity_initial": dict(self._state.team_capacity_initial),
+            "high_priority_slots_remaining": self._state.high_priority_slots_remaining,
+            "high_priority_slots_initial": self._state.high_priority_slots_initial,
+            "escalation_slots_remaining": self._state.escalation_slots_remaining,
+            "escalation_slots_initial": self._state.escalation_slots_initial,
+        }
+
+    def _planning_route_recommendation(self, ticket: HelpdeskTicketRecord) -> dict[str, Any]:
+        primary_route = self._route_for_ticket(ticket)
+        alternate_route = (
+            self._route_for_ticket(ticket, use_alternate=True)
+            if self._ticket_has_alternate_route(ticket)
+            else None
+        )
+        future_demand = self._future_queue_demand()
+        capacity_state = self._capacity_state_snapshot()
+
+        def pressure_score(route: dict[str, str]) -> int:
+            cost = self._route_capacity_cost(route)
+            group_remaining = capacity_state["team_capacity_remaining"].get(
+                route["assignment_group"],
+                1,
+            )
+            group_pressure = max(
+                0,
+                future_demand["team_demand"].get(route["assignment_group"], 0)
+                + cost["team_slots"]
+                - group_remaining,
+            )
+            priority_pressure = max(
+                0,
+                future_demand["high_priority_needed"] + cost["high_priority_slots"]
+                - capacity_state["high_priority_slots_remaining"],
+            )
+            escalation_pressure = max(
+                0,
+                future_demand["escalation_needed"] + cost["escalation_slots"]
+                - capacity_state["escalation_slots_remaining"],
+            )
+            return group_pressure + priority_pressure + escalation_pressure
+
+        primary_pressure = pressure_score(primary_route)
+        alternate_pressure = (
+            pressure_score(alternate_route) if alternate_route is not None else primary_pressure
+        )
+        preferred_label = (
+            "alternate"
+            if alternate_route is not None and alternate_pressure < primary_pressure
+            else "primary"
+        )
+        return {
+            "preferred_label": preferred_label,
+            "primary_pressure": primary_pressure,
+            "alternate_pressure": alternate_pressure,
+            "capacity_state": capacity_state,
+            "future_demand": future_demand,
+        }
+
+    def _ticket_is_capacity_sensitive(self, ticket: HelpdeskTicketRecord) -> bool:
+        if self._state.current_task_id != 3 or not self._ticket_has_alternate_route(ticket):
+            return False
+        recommendation = self._planning_route_recommendation(ticket)
+        return recommendation["preferred_label"] == "alternate" or any(
+            value > 0
+            for value in (
+                recommendation["primary_pressure"],
+                recommendation["alternate_pressure"],
+            )
+        )
+
+    def _route_matches_alternate(
+        self,
+        ticket: HelpdeskTicketRecord,
+        route: dict[str, str],
+    ) -> bool:
+        if not self._ticket_has_alternate_route(ticket):
+            return False
+        return route == self._route_for_ticket(ticket, use_alternate=True)
+
+    def _apply_capacity_usage(
+        self,
+        ticket: HelpdeskTicketRecord,
+        action: HelpdeskTicketAction,
+    ) -> tuple[float, dict[str, Any]]:
+        if self._state.current_task_id != 3:
+            return 0.0, {}
+
+        route = self._route_for_action(ticket, action)
+        capacity_cost = self._route_capacity_cost(route)
+        group = str(capacity_cost["assignment_group"])
+
+        if group not in self._state.team_capacity_remaining:
+            self._state.team_capacity_remaining[group] = 1
+            self._state.team_capacity_initial.setdefault(group, 1)
+
+        group_remaining = self._state.team_capacity_remaining[group]
+        group_overflow = max(0, int(capacity_cost["team_slots"]) - group_remaining)
+        self._state.team_capacity_remaining[group] = max(
+            0,
+            group_remaining - int(capacity_cost["team_slots"]),
+        )
+
+        high_priority_cost = int(capacity_cost["high_priority_slots"])
+        high_priority_overflow = max(
+            0,
+            high_priority_cost - self._state.high_priority_slots_remaining,
+        )
+        self._state.high_priority_slots_remaining = max(
+            0,
+            self._state.high_priority_slots_remaining - high_priority_cost,
+        )
+
+        escalation_cost = int(capacity_cost["escalation_slots"])
+        escalation_overflow = max(
+            0,
+            escalation_cost - self._state.escalation_slots_remaining,
+        )
+        self._state.escalation_slots_remaining = max(
+            0,
+            self._state.escalation_slots_remaining - escalation_cost,
+        )
+
+        capacity_penalty = round(
+            group_overflow * TEAM_CAPACITY_OVERFLOW_PENALTY
+            + high_priority_overflow * HIGH_PRIORITY_SLOT_OVERFLOW_PENALTY
+            + escalation_overflow * ESCALATION_SLOT_OVERFLOW_PENALTY,
+            4,
+        )
+        self._state.planning_penalty_total = round(
+            self._state.planning_penalty_total + capacity_penalty,
+            4,
+        )
+        self._state.planning_penalty_applied = capacity_penalty
+
+        used_alternate_route = self._route_matches_alternate(ticket, route)
+        if used_alternate_route:
+            self._state.capacity_pressure_tickets_resolved += 1
+
+        return capacity_penalty, {
+            "capacity_cost": capacity_cost,
+            "group_overflow": group_overflow,
+            "high_priority_overflow": high_priority_overflow,
+            "escalation_overflow": escalation_overflow,
+            "used_alternate_route": used_alternate_route,
+            "capacity_state_after_action": self._capacity_state_snapshot(),
+        }
+
+    def _planning_success_bonus(self) -> float:
+        if self._state.current_task_id != 3 or self._state.planning_penalty_total > 0.0:
+            return 0.0
+        capacity_sensitive_count = sum(
+            1 for ticket in self._queue if self._ticket_has_alternate_route(ticket)
+        )
+        if capacity_sensitive_count == 0:
+            return 0.0
+        coverage = min(
+            1.0,
+            self._state.capacity_pressure_tickets_resolved / capacity_sensitive_count,
+        )
+        return round(PLANNING_SUCCESS_BONUS * coverage, 4)
+
     def _internal_routing_note_for_ticket(
         self,
         ticket: HelpdeskTicketRecord,
     ) -> str | None:
-        if ticket.ambiguity_note is not None:
-            return ticket.ambiguity_note
         if self._state.current_task_id != 3:
-            return None
+            return ticket.ambiguity_note or ticket.planning_note
+
+        note_parts: list[str] = []
+        if ticket.ambiguity_note is not None:
+            note_parts.append(ticket.ambiguity_note)
+        if ticket.planning_note is not None:
+            note_parts.append(ticket.planning_note)
 
         default_group = ISSUE_TYPE_TO_ASSIGNMENT_GROUP.get(
             ticket.issue_type,
@@ -442,7 +840,6 @@ class HelpdeskTicketRoutingEnvironment(
             ticket.issue_type,
             ticket.resolution_action,
         )
-        note_parts: list[str] = []
 
         if ticket.assignment_group != default_group:
             note_parts.append(
@@ -517,6 +914,11 @@ class HelpdeskTicketRoutingEnvironment(
             return self._ticket_repeated_requester_count(ticket) >= 2
         if tool_name == "lookup_internal_routing_note":
             return self._internal_routing_note_for_ticket(ticket) is not None
+        if tool_name == "lookup_queue_capacity_forecast":
+            return self._state.current_task_id == 3 and (
+                self._ticket_has_alternate_route(ticket)
+                or self._future_queue_demand()["remaining_ticket_count"] > 0
+            )
         return False
 
     def _required_tools_for_ticket(
@@ -546,6 +948,11 @@ class HelpdeskTicketRoutingEnvironment(
             and "lookup_requester_history" not in required_tools
         ):
             required_tools.append("lookup_requester_history")
+        if (
+            self._ticket_is_capacity_sensitive(ticket)
+            and "lookup_queue_capacity_forecast" not in required_tools
+        ):
+            required_tools.append("lookup_queue_capacity_forecast")
         filtered_required_tools: list[str] = []
         for tool_name in required_tools:
             if tool_name in filtered_required_tools:
@@ -596,6 +1003,11 @@ class HelpdeskTicketRoutingEnvironment(
                 "The visible request is not enough to choose the final owner and next step. "
                 "Additional routing context is available via investigation."
             )
+        if self._ticket_has_alternate_route(ticket):
+            return (
+                "The queue is under resource pressure and this ticket may support more than "
+                "one acceptable routing path. Additional planning context is available via investigation."
+            )
         if self._ticket_has_nondefault_routing(ticket):
             return (
                 "The visible request looks straightforward, but the decisive routing detail is hidden until investigation."
@@ -609,6 +1021,8 @@ class HelpdeskTicketRoutingEnvironment(
             return "Follow-up request with hidden routing context"
         if self._internal_routing_note_for_ticket(ticket) is not None:
             return "Routing clarification required"
+        if self._ticket_has_alternate_route(ticket):
+            return "Capacity-sensitive routing decision"
         if self._ticket_mentions_follow_up(ticket):
             return "Priority support follow-up"
         return "Helpdesk routing decision"
@@ -805,6 +1219,24 @@ class HelpdeskTicketRoutingEnvironment(
             "routing_note": routing_note if found else "",
         }
 
+    def _lookup_queue_capacity_forecast(
+        self,
+        current_ticket: HelpdeskTicketRecord,
+    ) -> dict[str, Any]:
+        recommendation = self._planning_route_recommendation(current_ticket)
+        routing_options = self._routing_options_for_ticket(current_ticket)
+        return {
+            "tool_name": "lookup_queue_capacity_forecast",
+            "found": True,
+            "ticket_id": current_ticket.ticket_id,
+            "preferred_route_label": recommendation["preferred_label"],
+            "primary_pressure": recommendation["primary_pressure"],
+            "alternate_pressure": recommendation["alternate_pressure"],
+            "capacity_state": recommendation["capacity_state"],
+            "future_queue_demand": recommendation["future_demand"],
+            "routing_options": routing_options,
+        }
+
     def _run_investigation_tool(
         self,
         current_ticket: HelpdeskTicketRecord,
@@ -817,6 +1249,8 @@ class HelpdeskTicketRoutingEnvironment(
             return self._lookup_requester_history(current_ticket)
         if tool_name == "lookup_internal_routing_note":
             return self._lookup_internal_routing_note(current_ticket)
+        if tool_name == "lookup_queue_capacity_forecast":
+            return self._lookup_queue_capacity_forecast(current_ticket)
         raise ValueError(f"Unsupported tool_name: {tool_name}")
 
     def _handle_investigation_action(
@@ -901,12 +1335,15 @@ class HelpdeskTicketRoutingEnvironment(
     def _build_ticket_view(self, ticket: HelpdeskTicketRecord) -> dict[str, Any]:
         progress = self._tool_progress_for_ticket(ticket)
         remaining_tools = progress["remaining_tools"]
+        used_tools = set(self._used_tools_for_ticket(ticket.ticket_id))
         ticket_view: dict[str, Any] = {
             "ticket_id": ticket.ticket_id,
             "title": self._visible_title(ticket),
             "requester": ticket.requester,
             "description": self._visible_description(ticket),
         }
+        if self._state.current_task_id == 3:
+            ticket_view["capacity_state"] = self._capacity_state_snapshot()
         if progress["required_tools"]:
             ticket_view["context_status"] = {
                 "investigation_required": True,
@@ -919,6 +1356,11 @@ class HelpdeskTicketRoutingEnvironment(
             }
         if ticket.ambiguity_note is not None and "lookup_internal_routing_note" not in remaining_tools:
             ticket_view["ambiguity_note"] = ticket.ambiguity_note
+        if (
+            ticket.planning_note is not None
+            and "lookup_internal_routing_note" not in remaining_tools
+        ):
+            ticket_view["planning_note"] = ticket.planning_note
         if ticket.related_ticket_id is not None and "lookup_related_ticket" not in remaining_tools:
             ticket_view["related_ticket_id"] = ticket.related_ticket_id
             related_ticket = self._tickets_by_id.get(ticket.related_ticket_id)
@@ -929,6 +1371,11 @@ class HelpdeskTicketRoutingEnvironment(
                     "requester": related_ticket.requester,
                     "description": related_ticket.description,
                 }
+        if self._ticket_has_alternate_route(ticket) and (
+            "lookup_internal_routing_note" in used_tools
+            or "lookup_queue_capacity_forecast" in used_tools
+        ):
+            ticket_view["routing_options"] = self._routing_options_for_ticket(ticket)
         return ticket_view
 
     def _build_feedback_summary(
@@ -982,6 +1429,12 @@ class HelpdeskTicketRoutingEnvironment(
             risk_penalty = reward_components.get("risk_penalty")
             if risk_penalty:
                 parts.append(f"risk_penalty={risk_penalty:.2f}")
+            capacity_penalty = reward_components.get("capacity_penalty")
+            if capacity_penalty:
+                parts.append(f"capacity_penalty={capacity_penalty:.2f}")
+            planning_penalty_total = reward_components.get("planning_penalty_total")
+            if planning_penalty_total:
+                parts.append(f"planning_penalty_total={planning_penalty_total:.2f}")
 
         return "; ".join(parts)
 
@@ -1011,6 +1464,8 @@ class HelpdeskTicketRoutingEnvironment(
             "breakdown": breakdown,
             "queue_position": queue_position,
         }
+        if self._state.current_task_id == 3:
+            history_entry["capacity_state"] = self._capacity_state_snapshot()
         if reward is not None:
             history_entry["reward"] = reward
         if rubric_reward is not None:
@@ -1019,6 +1474,11 @@ class HelpdeskTicketRoutingEnvironment(
             history_entry["reward_kind"] = reward_kind
         if ticket.ambiguity_note is not None and "lookup_internal_routing_note" not in remaining_tools:
             history_entry["ambiguity_note"] = ticket.ambiguity_note
+        if (
+            ticket.planning_note is not None
+            and "lookup_internal_routing_note" not in remaining_tools
+        ):
+            history_entry["planning_note"] = ticket.planning_note
         if ticket.related_ticket_id is not None and "lookup_related_ticket" not in remaining_tools:
             history_entry["related_ticket_id"] = ticket.related_ticket_id
             related_ticket = self._tickets_by_id.get(ticket.related_ticket_id)
@@ -1029,6 +1489,14 @@ class HelpdeskTicketRoutingEnvironment(
                     "requester": related_ticket.requester,
                     "description": related_ticket.description,
                 }
+        if (
+            self._ticket_has_alternate_route(ticket)
+            and (
+                "lookup_internal_routing_note" not in remaining_tools
+                or "lookup_queue_capacity_forecast" in self._used_tools_for_ticket(ticket.ticket_id)
+            )
+        ):
+            history_entry["routing_options"] = self._routing_options_for_ticket(ticket)
         if penalty_reason is not None:
             history_entry["penalty_reason"] = penalty_reason
         if tool_result is not None:
@@ -1098,7 +1566,12 @@ class HelpdeskTicketRoutingEnvironment(
             "average_score_so_far": self._state.average_score_so_far,
             "progress_fraction": progress_fraction,
             "investigation_penalty_applied": self._state.investigation_penalty_applied,
+            "planning_penalty_total": self._state.planning_penalty_total,
+            "planning_penalty_applied": self._state.planning_penalty_applied,
         }
+        if self._state.current_task_id == 3:
+            metadata["capacity_state"] = self._capacity_state_snapshot()
+            metadata["future_queue_demand"] = self._future_queue_demand()
         if last_history_entry is not None:
             metadata["last_score"] = last_history_entry.get("score")
             metadata["last_reward"] = last_history_entry.get("reward")

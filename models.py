@@ -19,6 +19,7 @@ RESOLUTION_ACTION_SET = set(RESOLUTION_ACTIONS)
 ACTION_TYPE_SET = {"submit", "investigate"}
 TOOL_NAME_SET = {"lookup_related_ticket", "lookup_requester_history"}
 TOOL_NAME_SET.add("lookup_internal_routing_note")
+TOOL_NAME_SET.add("lookup_queue_capacity_forecast")
 
 
 def _validate_choice(value: str, allowed: set[str], field_name: str) -> str:
@@ -47,6 +48,12 @@ class HelpdeskTicketRecord(BaseModel):
     resolution_action: str
     ambiguity_note: Optional[str] = None
     related_ticket_id: Optional[str] = None
+    planning_note: Optional[str] = None
+    alternate_issue_type: Optional[str] = None
+    alternate_priority: Optional[str] = None
+    alternate_assignment_group: Optional[str] = None
+    alternate_resolution_action: Optional[str] = None
+    alternate_route_score_multiplier: float = 0.0
 
     @field_validator("issue_type")
     @classmethod
@@ -67,6 +74,44 @@ class HelpdeskTicketRecord(BaseModel):
     @classmethod
     def validate_resolution_action(cls, value: str) -> str:
         return _validate_choice(value, RESOLUTION_ACTION_SET, "resolution_action")
+
+    @field_validator("alternate_issue_type")
+    @classmethod
+    def validate_alternate_issue_type(cls, value: Optional[str]) -> Optional[str]:
+        return _validate_optional_choice(value, ISSUE_TYPE_SET, "alternate_issue_type")
+
+    @field_validator("alternate_priority")
+    @classmethod
+    def validate_alternate_priority(cls, value: Optional[str]) -> Optional[str]:
+        return _validate_optional_choice(value, PRIORITY_SET, "alternate_priority")
+
+    @field_validator("alternate_assignment_group")
+    @classmethod
+    def validate_alternate_assignment_group(cls, value: Optional[str]) -> Optional[str]:
+        return _validate_optional_choice(
+            value,
+            ASSIGNMENT_GROUP_SET,
+            "alternate_assignment_group",
+        )
+
+    @field_validator("alternate_resolution_action")
+    @classmethod
+    def validate_alternate_resolution_action(
+        cls,
+        value: Optional[str],
+    ) -> Optional[str]:
+        return _validate_optional_choice(
+            value,
+            RESOLUTION_ACTION_SET,
+            "alternate_resolution_action",
+        )
+
+    @field_validator("alternate_route_score_multiplier")
+    @classmethod
+    def validate_alternate_route_score_multiplier(cls, value: float) -> float:
+        if not 0.0 <= value <= 1.0:
+            raise ValueError("alternate_route_score_multiplier must be in [0.0, 1.0]")
+        return value
 
 
 class HelpdeskTicketAction(Action):
@@ -146,7 +191,16 @@ class HelpdeskTicketState(State):
     investigation_steps: int = 0
     investigation_budget_remaining: int = 0
     investigation_penalty_applied: float = 0.0
+    planning_penalty_applied: float = 0.0
     last_tool_result: Optional[dict[str, Any]] = None
     last_reward_components: dict[str, Any] = Field(default_factory=dict)
     ticket_tool_usage: dict[str, list[str]] = Field(default_factory=dict)
+    team_capacity_initial: dict[str, int] = Field(default_factory=dict)
+    team_capacity_remaining: dict[str, int] = Field(default_factory=dict)
+    high_priority_slots_initial: int = 0
+    high_priority_slots_remaining: int = 0
+    escalation_slots_initial: int = 0
+    escalation_slots_remaining: int = 0
+    planning_penalty_total: float = 0.0
+    capacity_pressure_tickets_resolved: int = 0
     history_entries: list[dict] = Field(default_factory=list)

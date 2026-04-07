@@ -44,8 +44,8 @@ def _make_env() -> HelpdeskTicketRoutingEnvironment:
 class TestExtraFieldsPenalty(unittest.TestCase):
     """Requirement 7: step() rejects actions with fields outside the task's allowed_fields."""
 
-    def test_extra_fields_returns_open_interval_penalty_reward(self) -> None:
-        """Task 1 penalties should keep the returned reward inside the open interval."""
+    def test_extra_fields_returns_closed_interval_penalty_reward(self) -> None:
+        """Task 1 penalties should keep the returned reward inside the unit interval."""
         env = _make_env()
         obs = env.reset(seed=42, task_id=1)
 
@@ -61,7 +61,7 @@ class TestExtraFieldsPenalty(unittest.TestCase):
         penalty_obs = env.step(action)
 
         self.assertIsInstance(penalty_obs, HelpdeskTicketObservation)
-        self.assertGreater(penalty_obs.reward, 0.0)
+        self.assertGreaterEqual(penalty_obs.reward, 0.0)
         self.assertLess(penalty_obs.reward, 1.0)
 
     def test_extra_fields_advances_ticket_index(self) -> None:
@@ -78,8 +78,8 @@ class TestExtraFieldsPenalty(unittest.TestCase):
 
         self.assertEqual(penalty_obs.tickets_processed, 1)
 
-    def test_extra_fields_records_score_inside_open_interval(self) -> None:
-        """per_ticket_scores must stay in the open interval after a penalty step."""
+    def test_extra_fields_records_score_inside_unit_interval(self) -> None:
+        """per_ticket_scores must stay in the unit interval after a penalty step."""
         env = _make_env()
         env.reset(seed=42, task_id=1)
 
@@ -91,7 +91,7 @@ class TestExtraFieldsPenalty(unittest.TestCase):
 
         state = env.state
         self.assertEqual(len(state.per_ticket_scores), 1)
-        self.assertGreater(state.per_ticket_scores[0], 0.0)
+        self.assertGreaterEqual(state.per_ticket_scores[0], 0.0)
         self.assertLess(state.per_ticket_scores[0], 1.0)
 
     def test_extra_fields_history_entry_has_penalty_reason(self) -> None:
@@ -109,7 +109,7 @@ class TestExtraFieldsPenalty(unittest.TestCase):
         entry = penalty_obs.history[0]
         self.assertIn("penalty_reason", entry)
         self.assertIn("assignment_group", entry["penalty_reason"])
-        self.assertGreater(entry["score"], 0.0)
+        self.assertGreaterEqual(entry["score"], 0.0)
         self.assertLess(entry["score"], 1.0)
 
     def test_no_extra_fields_grades_normally(self) -> None:

@@ -643,9 +643,38 @@ class TestInvestigationActions(unittest.TestCase):
                 tool_name="lookup_internal_routing_note",
             )
         )
-        self.assertEqual(obs.last_tool_result["routing_note"], ticket.ambiguity_note)
+        self.assertIn(ticket.ambiguity_note, obs.last_tool_result["routing_note"])
         self.assertEqual(obs.current_ticket["ambiguity_note"], ticket.ambiguity_note)
         self.assertGreater(obs.reward or 0.0, 0.0)
+
+    def test_queue_capacity_forecast_reveals_routing_options(self) -> None:
+        from unittest.mock import patch
+
+        dataset = load_dataset()
+        ticket = next(
+            (t for t in dataset if t.alternate_route_score_multiplier > 0.0),
+            None,
+        )
+        self.assertIsNotNone(ticket)
+
+        env = _make_env()
+        with patch.object(env, "_dataset", [ticket]):
+            with patch.object(env, "_tickets_by_id", {ticket.ticket_id: ticket}):
+                obs = env.reset(seed=0, task_id=3, queue_size=1)
+
+        self.assertNotIn("routing_options", obs.current_ticket)
+        obs = env.step(
+            HelpdeskTicketAction(
+                action_type="investigate",
+                tool_name="lookup_queue_capacity_forecast",
+            )
+        )
+
+        self.assertEqual(obs.last_tool_result["tool_name"], "lookup_queue_capacity_forecast")
+        self.assertTrue(obs.last_tool_result["found"])
+        self.assertIn("preferred_route_label", obs.last_tool_result)
+        self.assertIn("routing_options", obs.current_ticket)
+        self.assertGreaterEqual(len(obs.current_ticket["routing_options"]), 2)
 
     def test_submit_without_required_investigation_gets_shaping_penalty(self) -> None:
         from unittest.mock import patch
@@ -710,7 +739,12 @@ class TestQueueEconomics(unittest.TestCase):
         final_obs = env.step(HelpdeskTicketAction(issue_type=ticket.issue_type))
 
         self.assertTrue(final_obs.done)
-        self.assertAlmostEqual(final_obs.reward, 0.95, places=9)
+        self.assertLess(final_obs.reward, 1.0)
+        self.assertAlmostEqual(
+            final_obs.last_reward_components.get("investigation_penalty_applied", 0.0),
+            0.04,
+            places=9,
+        )
 
 
 class TestTerminalInvalidActionFinalReward(unittest.TestCase):

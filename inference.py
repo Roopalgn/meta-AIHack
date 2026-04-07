@@ -195,6 +195,7 @@ def format_recent_history_entries(
 
 def build_llm_user_message(ticket: dict, allowed_fields: list[str], instructions: str) -> str:
     ambiguity_note = ticket.get("ambiguity_note")
+    planning_note = ticket.get("planning_note")
     related_preview = ticket.get("related_ticket_preview") or {}
     last_tool_result = ticket.get("last_tool_result")
     context_status = ticket.get("context_status") or {}
@@ -204,9 +205,14 @@ def build_llm_user_message(ticket: dict, allowed_fields: list[str], instructions
     investigation_budget_remaining = ticket.get("investigation_budget_remaining")
     average_score_so_far = ticket.get("average_score_so_far")
     progress_fraction = ticket.get("progress_fraction")
+    capacity_state = ticket.get("capacity_state")
+    future_queue_demand = ticket.get("future_queue_demand")
+    routing_options = ticket.get("routing_options") or []
     extra_context_lines: list[str] = []
     if ambiguity_note:
         extra_context_lines.append(f"Ambiguity note: {ambiguity_note}")
+    if planning_note:
+        extra_context_lines.append(f"Planning note: {planning_note}")
     if related_preview:
         extra_context_lines.extend(
             [
@@ -223,6 +229,18 @@ def build_llm_user_message(ticket: dict, allowed_fields: list[str], instructions
     if context_status:
         extra_context_lines.append(
             "Context status: " + json.dumps(context_status, sort_keys=True)
+        )
+    if capacity_state:
+        extra_context_lines.append(
+            "Queue capacity state: " + json.dumps(capacity_state, sort_keys=True)
+        )
+    if future_queue_demand:
+        extra_context_lines.append(
+            "Future queue demand: " + json.dumps(future_queue_demand, sort_keys=True)
+        )
+    if routing_options:
+        extra_context_lines.append(
+            "Routing options: " + json.dumps(routing_options, sort_keys=True)
         )
     if feedback_summary:
         extra_context_lines.append(f"Latest environment feedback: {feedback_summary}")
@@ -293,7 +311,7 @@ def _format_bool(value: bool) -> str:
 
 
 def clamp_reported_score(score: float) -> float:
-    return max(0.01, min(0.99, score))
+    return max(0.0, min(1.0, score))
 
 
 def _format_action_for_log(action: HelpdeskTicketAction) -> str:
@@ -553,14 +571,19 @@ TIME_SENSITIVE_PRIORITY_KEYWORDS = (
 def build_routing_text(ticket: dict) -> str:
     related_preview = ticket.get("related_ticket_preview") or {}
     last_tool_result = ticket.get("last_tool_result") or {}
+    routing_options = ticket.get("routing_options") or []
     return " ".join(
         [
             ticket.get("title", ""),
             ticket.get("description", ""),
             ticket.get("ambiguity_note", ""),
+            ticket.get("planning_note", ""),
             related_preview.get("title", ""),
             related_preview.get("description", ""),
             json.dumps(last_tool_result, sort_keys=True),
+            json.dumps(routing_options, sort_keys=True),
+            json.dumps(ticket.get("capacity_state") or {}, sort_keys=True),
+            json.dumps(ticket.get("future_queue_demand") or {}, sort_keys=True),
         ]
     ).lower()
 
@@ -630,6 +653,90 @@ def heuristic_action(
     return result
 
 
+def _get_routing_options(ticket: dict[str, Any]) -> list[dict[str, Any]]:
+    options = ticket.get("routing_options") or []
+    return [option for option in options if isinstance(option, dict)]
+
+
+def _get_routing_option_by_label(
+    ticket: dict[str, Any],
+    label: str | None,
+) -> dict[str, Any] | None:
+    if label is None:
+        return None
+    for option in _get_routing_options(ticket):
+        if option.get("label") == label:
+            return option
+    return None
+
+
+def _route_option_fields_match(
+    option: dict[str, Any],
+    candidate: dict[str, Any],
+    allowed_fields: list[str],
+) -> bool:
+    for field in ("issue_type", "priority", "assignment_group", "resolution_action"):
+        if field not in allowed_fields:
+            continue
+        option_value = option.get(field)
+        candidate_value = candidate.get(field)
+        if option_value is None or candidate_value is None:
+            continue
+        if str(option_value) != str(candidate_value):
+            return False
+    return True
+
+
+def _preferred_routing_label(ticket: dict[str, Any]) -> str | None:
+    last_tool_result = ticket.get("last_tool_result") or {}
+    tool_name = str(last_tool_result.get("tool_name", "") or "")
+    preferred_label = str(last_tool_result.get("preferred_route_label", "") or "")
+    if tool_name == "lookup_queue_capacity_forecast" and preferred_label in {
+        "primary",
+        "alternate",
+    }:
+        return preferred_label
+    return None
+
+
+def apply_capacity_planning_overrides(
+    ticket: dict[str, Any],
+    candidate: dict[str, Any],
+    allowed_fields: list[str],
+) -> tuple[dict[str, Any], list[str]]:
+    updated = dict(candidate)
+    reasons: list[str] = []
+    preferred_label = _preferred_routing_label(ticket)
+    preferred_option = _get_routing_option_by_label(ticket, preferred_label)
+    if preferred_option is None:
+        return updated, reasons
+
+    current_matching_label = None
+    for option in _get_routing_options(ticket):
+        if _route_option_fields_match(option, updated, allowed_fields):
+            current_matching_label = option.get("label")
+            break
+
+    if current_matching_label == preferred_label:
+        return updated, reasons
+
+    for field in ("issue_type", "priority", "assignment_group", "resolution_action"):
+        if field not in allowed_fields:
+            continue
+        option_value = preferred_option.get(field)
+        if option_value is None:
+            continue
+        updated[field] = option_value
+
+    last_tool_result = ticket.get("last_tool_result") or {}
+    reasons.append(
+        "planning_override="
+        f"{preferred_label}(primary_pressure={last_tool_result.get('primary_pressure')},"
+        f"alternate_pressure={last_tool_result.get('alternate_pressure')})"
+    )
+    return updated, reasons
+
+
 def apply_domain_overrides(
     ticket: dict, candidate: dict[str, Any], allowed_fields: list[str]
 ) -> tuple[dict[str, Any], list[str]]:
@@ -697,9 +804,27 @@ def build_action(
     ticket: dict, allowed_fields: list[str], instructions: str
 ) -> tuple[HelpdeskTicketAction, str, str | None]:
     heuristic_dict = heuristic_action(ticket, allowed_fields)
+    heuristic_dict, heuristic_override_reasons = apply_domain_overrides(
+        ticket,
+        heuristic_dict,
+        allowed_fields,
+    )
+    heuristic_dict, heuristic_planning_reasons = apply_capacity_planning_overrides(
+        ticket,
+        heuristic_dict,
+        allowed_fields,
+    )
 
     if llm_client is None:
-        return HelpdeskTicketAction(**heuristic_dict), "heuristic", None
+        fallback_reason = None
+        reason_parts = []
+        if heuristic_override_reasons:
+            reason_parts.append(f"domain_overrides={heuristic_override_reasons}")
+        if heuristic_planning_reasons:
+            reason_parts.append(f"planning_overrides={heuristic_planning_reasons}")
+        if reason_parts:
+            fallback_reason = "; ".join(reason_parts)
+        return HelpdeskTicketAction(**heuristic_dict), "heuristic", fallback_reason
 
     try:
         llm_dict = call_llm(ticket, allowed_fields, instructions)
@@ -731,9 +856,19 @@ def build_action(
             candidate,
             allowed_fields,
         )
+        candidate, planning_override_reasons = apply_capacity_planning_overrides(
+            ticket,
+            candidate,
+            allowed_fields,
+        )
 
         backfilled_fields = [field for field in allowed_fields if field not in accepted_fields]
-        if backfilled_fields or rejected_fields or override_reasons:
+        if (
+            backfilled_fields
+            or rejected_fields
+            or override_reasons
+            or planning_override_reasons
+        ):
             reason_parts = []
             if backfilled_fields:
                 reason_parts.append(f"heuristic_backfill={backfilled_fields}")
@@ -741,6 +876,8 @@ def build_action(
                 reason_parts.append(f"invalid_llm_fields={rejected_fields}")
             if override_reasons:
                 reason_parts.append(f"domain_overrides={override_reasons}")
+            if planning_override_reasons:
+                reason_parts.append(f"planning_overrides={planning_override_reasons}")
             return (
                 HelpdeskTicketAction(**candidate),
                 "llm_backfilled",
@@ -752,7 +889,23 @@ def build_action(
         return (
             HelpdeskTicketAction(**heuristic_dict),
             "heuristic_fallback",
-            str(exc),
+            "; ".join(
+                part
+                for part in (
+                    str(exc),
+                    (
+                        f"domain_overrides={heuristic_override_reasons}"
+                        if heuristic_override_reasons
+                        else None
+                    ),
+                    (
+                        f"planning_overrides={heuristic_planning_reasons}"
+                        if heuristic_planning_reasons
+                        else None
+                    ),
+                )
+                if part
+            ),
         )
 
 
@@ -857,6 +1010,7 @@ def should_investigate(ticket: dict, history: list[dict[str, Any]]) -> tuple[boo
     if hidden_context_remaining:
         preferred_tools.extend(
             [
+                "lookup_queue_capacity_forecast",
                 "lookup_related_ticket",
                 "lookup_internal_routing_note",
                 "lookup_requester_history",
@@ -892,6 +1046,14 @@ def merge_ticket_context(ticket: dict, observation: Any) -> dict:
     observation_metadata = getattr(observation, "metadata", {}) or {}
     if observation_metadata.get("last_feedback_summary"):
         merged_ticket["feedback_summary"] = observation_metadata["last_feedback_summary"]
+    if observation_metadata.get("capacity_state") is not None:
+        merged_ticket["capacity_state"] = observation_metadata["capacity_state"]
+    if observation_metadata.get("future_queue_demand") is not None:
+        merged_ticket["future_queue_demand"] = observation_metadata["future_queue_demand"]
+    if observation_metadata.get("planning_penalty_total") is not None:
+        merged_ticket["planning_penalty_total"] = observation_metadata["planning_penalty_total"]
+    if observation_metadata.get("planning_penalty_applied") is not None:
+        merged_ticket["planning_penalty_applied"] = observation_metadata["planning_penalty_applied"]
     return merged_ticket
 
 
@@ -933,12 +1095,10 @@ def run() -> None:
                 if ticket is None:
                     break
 
-                investigate, tool_name = should_investigate(ticket, obs.history)
-                if (
-                    investigate
-                    and tool_name is not None
-                    and getattr(obs, "investigation_budget_remaining", 0) > 0
-                ):
+                while getattr(obs, "investigation_budget_remaining", 0) > 0:
+                    investigate, tool_name = should_investigate(ticket, obs.history)
+                    if not investigate or tool_name is None:
+                        break
                     tool_action = HelpdeskTicketAction(
                         action_type="investigate",
                         tool_name=tool_name,
@@ -947,10 +1107,13 @@ def run() -> None:
                     result = sync_client.step(tool_action)
                     obs = result.observation
                     step_num += 1
+                    reward = float(result.reward or 0.0)
+                    if result.reward is not None:
+                        task_step_rewards.append(reward)
                     log_step(
                         step=step_num,
                         action=tool_action,
-                        reward=float(result.reward or 0.0),
+                        reward=reward,
                         done=bool(result.done),
                         error=None,
                     )
@@ -959,6 +1122,11 @@ def run() -> None:
                     ticket = obs.current_ticket
                     if ticket is None:
                         break
+                if result.done:
+                    break
+                ticket = obs.current_ticket
+                if ticket is None:
+                    break
 
                 ticket_with_context = merge_ticket_context(ticket, obs)
                 action, action_source, fallback_reason = build_action(

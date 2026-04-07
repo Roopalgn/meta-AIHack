@@ -55,21 +55,22 @@ This domain is useful for OpenEnv because it is operationally realistic, easy to
 The project uses a queue-based episode model.
 
 - `reset()` samples a task and a queue of 3 to 5 tickets
-- `step()` grades one ticket submission at a time
+- `step()` lets the agent investigate or submit one ticket at a time
 - `state()` exposes the internal episode snapshot
-- final reward is based on average ticket quality across the queue
+- hard-task episodes also track queue-level capacity, alternate acceptable routes, and planning penalties across tickets
+- final evaluation is based on the queue outcome, not on isolated per-ticket classification alone
 
 The environment classes and vocabulary are intentionally frozen to keep collaboration and judging simple.
 
 ## Lightweight Policy Improvement Loop
 
-The repo now includes a small local learning runner in `policy_learning.py`. It does not update model weights, but it does run repeated rollouts over many seeds, log full trajectories, and select the best policy configuration from a discrete candidate set using observed reward.
+The repo includes a local policy runner in `policy_learning.py`. It still does not update model weights, but it now does more than cosmetic search: it evaluates repeated seeded rollouts, learns cue-conditioned tool preferences for investigation, uses the same planning-aware deterministic submit logic as `inference.py`, and ranks policies by terminal rubric reward first, with lower planning penalty as the tie-breaker.
 
-That gives the project a real improvement loop for judge demos:
+That gives the project a meaningful improvement loop for judge demos:
 
-- compare `no_investigation` against `investigate_when_context_hidden`
-- log per-step rewards, feedback summaries, and reward components to JSONL
-- search over small policy variants such as `legacy_single_probe`, `context_chain`, and `hybrid_context`
+- compare `no_investigation`, `investigate_when_context_hidden`, and `adaptive_cue_bandit`
+- log per-step rewards, feedback summaries, planning penalties, and reward components to JSONL
+- learn when to use `lookup_queue_capacity_forecast` versus the other investigation tools
 - select the best policy on train seeds, then re-evaluate it on holdout seeds
 
 Example commands:
@@ -90,7 +91,7 @@ Artifacts are written to `analysis/policy_learning_runs/` by default:
 - `search_eval_episodes.jsonl`
 - `search_eval_trajectories.jsonl`
 
-The default submit policy inside this runner stays deterministic and local. It reuses the repo's heuristic routing logic, so the discrete policy search focuses on investigation behavior and reward-driven policy selection rather than on external LLM latency or API cost.
+The default submit policy inside this runner stays deterministic and local. It reuses the repo's heuristic routing logic plus planning-aware routing overrides, so the search loop can study both investigation policy and queue-aware submission quality without depending on external LLM latency or API cost.
 
 ## Task Ladder
 
@@ -149,8 +150,11 @@ Visible ticket fields:
 - `requester`
 - `description`
 - optional `ambiguity_note`
+- optional `planning_note`
 - optional `related_ticket_id`
 - optional `related_ticket_preview`
+- optional `routing_options`
+- optional `capacity_state`
 
 Each observation also includes:
 
@@ -173,6 +177,8 @@ Each observation also includes:
 - `last_reward_components`
 - `rubric_reward` on terminal observations
 - `metadata.last_feedback_summary` for compact reward / penalty feedback
+- `metadata.capacity_state` and `metadata.future_queue_demand` on hard-task episodes
+- `metadata.planning_penalty_total` and `metadata.planning_penalty_applied`
 - standard OpenEnv fields such as `done` and `reward`
 
 The internal `HelpdeskTicketState` tracks:
@@ -187,6 +193,10 @@ The internal `HelpdeskTicketState` tracks:
 - `total_reward`
 - `reward`
 - `done`
+- `team_capacity_remaining`
+- `high_priority_slots_remaining`
+- `escalation_slots_remaining`
+- `planning_penalty_total`
 
 ## Grading And Reward
 
@@ -202,14 +212,17 @@ Available tools:
 - `lookup_related_ticket`
 - `lookup_requester_history`
 - `lookup_internal_routing_note`
+- `lookup_queue_capacity_forecast`
 
 Hard-task investigation behavior:
 
 - some ambiguous and non-default-routing tickets start with both redacted titles and redacted descriptions
 - linked-ticket previews and internal routing notes stay hidden until the matching tool is used
+- capacity-sensitive tickets can expose queue pressure, future demand, and alternate routing options through `lookup_queue_capacity_forecast`
 - only useful investigation steps return a small positive shaping reward
 - blind or repeated probing does not pay by default
 - premature hard-task submission can incur a shaping penalty even when the visible text looks plausible
+- resource-greedy routing can add planning penalties later in the queue even when a single ticket looks correct in isolation
 - terminal `rubric_reward` remains the objective evaluation signal, while per-step `reward` is the denser training signal
 
 Per-field behavior:
@@ -218,6 +231,7 @@ Per-field behavior:
 - `priority`: exact match or proximity credit
 - `assignment_group`: exact match, with a small declared partial-credit map for nearby ownership mistakes
 - `resolution_action`: exact match, with a small declared partial-credit map for nearby next-step mistakes
+- hard task only: some tickets also declare an alternate acceptable route with a reduced score multiplier, so the grader can reward capacity-aware fallback choices without collapsing into full fuzziness
 
 Task weights:
 
@@ -227,22 +241,23 @@ Task weights:
 | 2 | 60% | 40% | - | - |
 | 3 | 35% | 20% | 25% | 20% |
 
-Final episode reward:
+Final episode rubric reward is queue-based:
 
 ```text
-average(per_ticket_scores)
+clamp(average(per_ticket_scores) + trajectory bonuses - planning penalties - extra investigation penalties)
 ```
 
-The result is clamped to `[0.0, 1.0]`.
+Both `reward` and `rubric_reward` now use the closed interval `[0.0, 1.0]`.
 
 Step reward is lightly milestone-shaped: high per-ticket scores get a small bonus and very low scores get a small penalty before the final clamp.
 
-Final reward also includes a queue-economics penalty when the agent exceeds the free investigation budget. One investigation per queued ticket is free, but extra investigation steps reduce the final reward more noticeably than before.
+Final reward also includes a queue-economics penalty when the agent exceeds the free investigation budget. One investigation per queued ticket is free, but extra investigation steps reduce the final reward more noticeably than before. On hard-task queues, assignment-group capacity, high-priority slots, and escalation slots also create cross-ticket trade-offs.
 
 To make the environment more RL-friendly, each observation now also surfaces structured reward telemetry:
 
 - `last_reward_components` exposes ticket score, shaped step reward, milestone adjustment, trajectory reward when applicable, and any investigation penalty applied
 - `average_score_so_far` and `progress_fraction` expose trajectory progress without leaking future labels
+- hard-task telemetry includes planning penalties, capacity usage, and the post-action capacity snapshot
 - `history` retains the same reward components plus a compact `feedback_summary` string for downstream agents
 
 ## Grounded Scoring
@@ -253,6 +268,7 @@ The grader is intentionally narrow and declared, not fully fuzzy.
 - `assignment_group` and `resolution_action` now expose only a small declared partial-credit map for nearby mistakes
 - `priority` only gets proximity credit from the declared table in `server/grader.py`
 - `issue_type` only gets partial credit for a small declared similarity map
+- hard-task alternate routes must be explicitly declared in the dataset and carry an explicit score multiplier
 - wrong labels outside those explicit maps score `0.0`
 
 That scoring policy is now backed by checked-in unit tests in `tests/test_grader_unit.py` and `tests/test_tasks_unit.py`.
@@ -267,7 +283,7 @@ That grounding pass supported keeping the current similarity map small and expla
 
 ## Dataset Snapshot
 
-The labeled dataset in `data/dataset.json` currently contains 45 tickets spanning straightforward and ambiguous helpdesk scenarios.
+The effective labeled dataset now contains 70 tickets spanning straightforward, ambiguous, and planning-sensitive helpdesk scenarios.
 
 It includes:
 
@@ -280,6 +296,9 @@ It includes:
 - onboarding tickets
 - feature requests
 - follow-up cases linked through `related_ticket_id`
+- 16 tickets with explicit ambiguity notes
+- 7 linked follow-up cases
+- 22 tickets with declared alternate routes for queue-level planning
 
 ## Difficulty Coverage
 
