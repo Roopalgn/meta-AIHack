@@ -57,6 +57,7 @@ from client import HelpdeskTicketEnvClient
 from models import HelpdeskTicketAction
 from vocabulary import (
     ASSIGNMENT_GROUPS,
+    APP_ENV_NAME,
     ISSUE_TYPES,
     ISSUE_TYPE_TO_ASSIGNMENT_GROUP,
     ISSUE_TYPE_TO_RESOLUTION_ACTION,
@@ -288,8 +289,66 @@ def call_llm(ticket: dict, allowed_fields: list[str], instructions: str) -> dict
         return {}
 
 
-def emit_log(tag: str, **payload: Any) -> None:
-    print(f"[{tag}] {json.dumps(payload, sort_keys=True, ensure_ascii=True)}")
+def _format_bool(value: bool) -> str:
+    return str(bool(value)).lower()
+
+
+def clamp_reported_score(score: float) -> float:
+    return max(0.01, min(0.99, score))
+
+
+def _format_action_for_log(action: HelpdeskTicketAction) -> str:
+    return json.dumps(
+        action.model_dump(exclude_none=True),
+        sort_keys=True,
+        ensure_ascii=True,
+        separators=(",", ":"),
+    )
+
+
+def _format_error_for_log(error: str | None) -> str:
+    if not error:
+        return "null"
+    return error.replace("\r", " ").replace("\n", " ")
+
+
+def _format_reward_for_log(reward: float | None) -> str:
+    return f"{clamp_reported_score(float(reward or 0.0)):.2f}"
+
+
+def log_start(task_name: str) -> None:
+    print(f"[START] task={task_name} env={APP_ENV_NAME} model={MODEL_NAME}", flush=True)
+
+
+def log_step(
+    *,
+    step: int,
+    action: HelpdeskTicketAction,
+    reward: float | None,
+    done: bool,
+    error: str | None,
+) -> None:
+    print(
+        "[STEP] "
+        f"step={step} "
+        f"action={_format_action_for_log(action)} "
+        f"reward={_format_reward_for_log(reward)} "
+        f"done={_format_bool(done)} "
+        f"error={_format_error_for_log(error)}",
+        flush=True,
+    )
+
+
+def log_end(*, success: bool, steps: int, score: float, rewards: list[float]) -> None:
+    rewards_str = ",".join(_format_reward_for_log(reward) for reward in rewards)
+    print(
+        "[END] "
+        f"success={_format_bool(success)} "
+        f"steps={steps} "
+        f"score={clamp_reported_score(score):.2f} "
+        f"rewards={rewards_str}",
+        flush=True,
+    )
 
 
 def get_tasks_to_run(available_tasks: dict) -> list[int]:
@@ -311,10 +370,6 @@ def get_tasks_to_run(available_tasks: dict) -> list[int]:
         return []
     # Default to all declared tasks so validator-style runs exercise all graders.
     return available_task_ids
-
-
-def clamp_reported_score(score: float) -> float:
-    return max(0.001, min(0.999, score))
 
 
 # ---------------------------------------------------------------------------
@@ -849,8 +904,6 @@ def run() -> None:
     available_tasks = {t["id"]: t for t in tasks_resp.json()["tasks"]}
     http.close()
 
-    all_results: dict[int, dict[str, float | int]] = {}
-
     tasks_to_run = get_tasks_to_run(available_tasks)
     if not tasks_to_run:
         return
@@ -859,15 +912,7 @@ def run() -> None:
             continue
 
         task = available_tasks[task_id]
-        emit_log(
-            "START",
-            env_url=ENV_URL,
-            mode="llm" if llm_client is not None else "heuristic",
-            seed=SEED,
-            task_difficulty=task["difficulty"],
-            task_id=task_id,
-            task_name=task["name"],
-        )
+        log_start(task["name"])
 
         sync_client = HelpdeskTicketEnvClient(base_url=ENV_URL).sync()
         with sync_client:
@@ -896,16 +941,12 @@ def run() -> None:
                     result = sync_client.step(tool_action)
                     obs = result.observation
                     step_num += 1
-                    emit_log(
-                        "STEP",
-                        action=tool_action.model_dump(exclude_none=True),
-                        action_source="investigation_tool",
-                        done=bool(result.done),
-                        fallback_reason=None,
-                        reward=float(result.reward or 0.0),
+                    log_step(
                         step=step_num,
-                        task_id=task_id,
-                        ticket_id=ticket["ticket_id"],
+                        action=tool_action,
+                        reward=float(result.reward or 0.0),
+                        done=bool(result.done),
+                        error=None,
                     )
                     if result.done:
                         break
@@ -927,16 +968,12 @@ def run() -> None:
                 if result.reward is not None:
                     task_step_rewards.append(reward)
 
-                emit_log(
-                    "STEP",
-                    action=action.model_dump(exclude_none=True),
-                    action_source=action_source,
-                    done=bool(result.done),
-                    fallback_reason=fallback_reason,
-                    reward=reward,
+                log_step(
                     step=step_num,
-                    task_id=task_id,
-                    ticket_id=ticket["ticket_id"],
+                    action=action,
+                    reward=reward,
+                    done=bool(result.done),
+                    error=fallback_reason,
                 )
 
         final_rubric_reward = getattr(obs, "rubric_reward", None)
@@ -946,17 +983,11 @@ def run() -> None:
             else (task_step_rewards[-1] if task_step_rewards else 0.0)
         )
         reported_score = clamp_reported_score(final_reward)
-        all_results[task_id] = {
-            "final_reward": final_reward,
-            "step_count": step_num,
-        }
-        emit_log(
-            "END",
-            final_reward=round(reported_score, 4),
-            score=round(reported_score, 4),
-            step_count=step_num,
-            task_id=task_id,
-            task_name=task["name"],
+        log_end(
+            success=bool(obs.done),
+            steps=step_num,
+            score=reported_score,
+            rewards=task_step_rewards,
         )
 
 

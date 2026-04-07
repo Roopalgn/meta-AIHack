@@ -218,7 +218,7 @@ class HelpdeskTicketRoutingEnvironment(
                 final_reward = self._apply_episode_economics(trajectory_reward)
                 self._state.total_reward = final_reward
             else:
-                final_reward = 0.0
+                final_reward = clamp_open_unit_interval(0.0)
             reward_components = self._build_reward_components(
                 ticket_score=invalid_score,
                 field_breakdown={},
@@ -320,7 +320,7 @@ class HelpdeskTicketRoutingEnvironment(
             self._state.average_score_so_far = self._current_average_score()
             self._state.step_count += 1
             self._state.current_ticket_index += 1
-            final_reward = max(0.0, min(1.0, step_reward - context_penalty))
+            final_reward = clamp_open_unit_interval(step_reward - context_penalty)
 
         reward_components = self._build_reward_components(
             ticket_score=score,
@@ -753,7 +753,9 @@ class HelpdeskTicketRoutingEnvironment(
             self._state.investigation_budget_remaining - 1,
         )
         self._state.last_tool_result = tool_result
-        investigation_reward = USEFUL_INVESTIGATION_REWARD if useful_investigation else 0.0
+        investigation_reward = clamp_open_unit_interval(
+            USEFUL_INVESTIGATION_REWARD if useful_investigation else 0.0
+        )
         investigation_score = clamp_open_unit_interval(0.0)
         self._state.last_step_reward = investigation_reward
         self._state.reward = investigation_reward

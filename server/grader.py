@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from models import HelpdeskTicketAction, HelpdeskTicketRecord
 
-TASK_SCORE_EPSILON = 0.001
+TASK_SCORE_EPSILON = 0.01
 
 
 ISSUE_TYPE_SIMILARITY = {

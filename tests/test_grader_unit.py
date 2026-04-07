@@ -45,7 +45,7 @@ class GraderUnitTests(unittest.TestCase):
 
         score, breakdown = grade_action(action, ticket, task_id=3)
 
-        self.assertAlmostEqual(score, 0.999)
+        self.assertAlmostEqual(score, 0.99)
         self.assertEqual(
             breakdown,
             {
@@ -86,7 +86,7 @@ class GraderUnitTests(unittest.TestCase):
                         if predicted == expected
                         else ISSUE_TYPE_SIMILARITY.get((predicted, expected), 0.0)
                     )
-                    expected_task_score = max(0.001, min(0.999, raw_expected_score))
+                    expected_task_score = max(0.01, min(0.99, raw_expected_score))
                     self.assertAlmostEqual(score, expected_task_score)
                     self.assertEqual(breakdown, {"issue_type": raw_expected_score})
 
@@ -96,7 +96,7 @@ class GraderUnitTests(unittest.TestCase):
 
         score, breakdown = grade_action(action, ticket, task_id=1)
 
-        self.assertAlmostEqual(score, 0.001)
+        self.assertAlmostEqual(score, 0.01)
         self.assertEqual(breakdown, {"issue_type": 0.0})
 
     def test_priority_scoring_uses_defined_proximity_table(self) -> None:
@@ -131,7 +131,7 @@ class GraderUnitTests(unittest.TestCase):
                         {"issue_type": 1.0, "priority": priority_score},
                     )
                     raw_score = 0.6 + 0.4 * priority_score
-                    expected_task_score = max(0.001, min(0.999, raw_score))
+                    expected_task_score = max(0.01, min(0.99, raw_score))
                     self.assertAlmostEqual(score, expected_task_score)
 
     def test_task_2_weights_apply_as_documented(self) -> None:

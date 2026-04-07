@@ -44,8 +44,8 @@ def _make_env() -> HelpdeskTicketRoutingEnvironment:
 class TestExtraFieldsPenalty(unittest.TestCase):
     """Requirement 7: step() rejects actions with fields outside the task's allowed_fields."""
 
-    def test_extra_fields_returns_reward_zero(self) -> None:
-        """Task 1 only allows issue_type and priority; submitting assignment_group triggers penalty."""
+    def test_extra_fields_returns_open_interval_penalty_reward(self) -> None:
+        """Task 1 penalties should keep the returned reward inside the open interval."""
         env = _make_env()
         obs = env.reset(seed=42, task_id=1)
 
@@ -61,7 +61,8 @@ class TestExtraFieldsPenalty(unittest.TestCase):
         penalty_obs = env.step(action)
 
         self.assertIsInstance(penalty_obs, HelpdeskTicketObservation)
-        self.assertEqual(penalty_obs.reward, 0.0)
+        self.assertGreater(penalty_obs.reward, 0.0)
+        self.assertLess(penalty_obs.reward, 1.0)
 
     def test_extra_fields_advances_ticket_index(self) -> None:
         """Penalty step must advance tickets_processed by 1."""
