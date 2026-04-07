@@ -574,6 +574,126 @@
         "resolution_action":  "fulfill",
         "ambiguity_note":  "Contractor onboarding blocked by access issue, routed to service desk",
         "related_ticket_id":  null
+    },
+    {
+        "ticket_id":  "ticket-046",
+        "title":  "Privileged admin login blocked during security review",
+        "requester":  "security-ops@atlasbank.io",
+        "description":  "Our privileged admin account was locked during an internal security review. We need access restored, but the security team must verify the incident trail before the account is reopened.",
+        "issue_type":  "identity_access",
+        "priority":  "critical",
+        "assignment_group":  "security_team",
+        "resolution_action":  "escalate",
+        "ambiguity_note":  "Looks like a login problem, but security owns the privileged-access review and release decision.",
+        "related_ticket_id":  null
+    },
+    {
+        "ticket_id":  "ticket-047",
+        "title":  "Temporary sandbox extension for signed pilot",
+        "requester":  "solutions@bluequarry.io",
+        "description":  "The commercial pilot is already approved. We only need the existing sandbox kept alive for two more weeks so the customer can finish testing.",
+        "issue_type":  "service_request",
+        "priority":  "medium",
+        "assignment_group":  "service_desk",
+        "resolution_action":  "fulfill",
+        "ambiguity_note":  "Commercial context is present, but the actual action is an operational extension the service desk can fulfill directly.",
+        "related_ticket_id":  null
+    },
+    {
+        "ticket_id":  "ticket-048",
+        "title":  "Who approves seat-transfer terms in the vendor questionnaire?",
+        "requester":  "vendorops@aurorahealth.org",
+        "description":  "Our procurement team is filling out your vendor questionnaire and needs clarification on who approves seat-transfer language before we continue the review.",
+        "issue_type":  "general_inquiry",
+        "priority":  "medium",
+        "assignment_group":  "procurement",
+        "resolution_action":  "assign",
+        "ambiguity_note":  "The request is a question, but it belongs with the commercial owner rather than the generic service desk.",
+        "related_ticket_id":  null
+    },
+    {
+        "ticket_id":  "ticket-049",
+        "title":  "Credential-defense rollout is causing auth API failures",
+        "requester":  "platform@nightferry.dev",
+        "description":  "The authentication API is returning intermittent 403 errors after a credential-stuffing defense rule was enabled. Product behavior is broken, but security needs to triage the mitigation first.",
+        "issue_type":  "application_support",
+        "priority":  "high",
+        "assignment_group":  "security_team",
+        "resolution_action":  "escalate",
+        "ambiguity_note":  "The symptom looks like application support, but the active security control owns the first response path.",
+        "related_ticket_id":  null
+    },
+    {
+        "ticket_id":  "ticket-050",
+        "title":  "Acquired-team onboarding needs cross-functional coordination",
+        "requester":  "integration@mergerco.com",
+        "description":  "Thirty acquired employees start next week and need onboarding, access setup, hardware coordination, and shared mailbox provisioning across multiple internal teams.",
+        "issue_type":  "onboarding",
+        "priority":  "high",
+        "assignment_group":  "service_desk",
+        "resolution_action":  "assign",
+        "ambiguity_note":  "The workflow is onboarding, but it requires central service-desk coordination instead of a single onboarding-ops fulfillment step.",
+        "related_ticket_id":  null
+    },
+    {
+        "ticket_id":  "ticket-051",
+        "title":  "Renewal credit memo requires contract amendment approval",
+        "requester":  "procurement@crownlogistics.com",
+        "description":  "Finance approved the renewal credit memo, but the contract amendment still needs commercial approval before the invoice can be corrected.",
+        "issue_type":  "billing_license",
+        "priority":  "medium",
+        "assignment_group":  "procurement",
+        "resolution_action":  "assign",
+        "ambiguity_note":  "This sounds billing-related, but the remaining work is a commercial contract amendment owned by procurement.",
+        "related_ticket_id":  null
+    },
+    {
+        "ticket_id":  "ticket-052",
+        "title":  "Need remediation evidence package for product vulnerability",
+        "requester":  "assurance@clientgrid.com",
+        "description":  "Our assurance team needs the remediation evidence package for a previously confirmed application vulnerability before we close the compliance review.",
+        "issue_type":  "security_compliance",
+        "priority":  "high",
+        "assignment_group":  "application_team",
+        "resolution_action":  "fulfill",
+        "ambiguity_note":  "The request is compliance-driven, but the application team must provide the concrete remediation evidence.",
+        "related_ticket_id":  null
+    },
+    {
+        "ticket_id":  "ticket-053",
+        "title":  "Customer requests penetration-test window and allowlist",
+        "requester":  "engsec@vectorlabs.io",
+        "description":  "We want to schedule a penetration test and need the approved window plus the process for allowlisting our source IPs.",
+        "issue_type":  "service_request",
+        "priority":  "medium",
+        "assignment_group":  "security_team",
+        "resolution_action":  "assign",
+        "ambiguity_note":  "This is a request, but the security team owns approval and coordination instead of procurement.",
+        "related_ticket_id":  null
+    },
+    {
+        "ticket_id":  "ticket-054",
+        "title":  "Need archived invoice copies for board audit binder",
+        "requester":  "boardops@silverpine.com",
+        "description":  "The board audit binder needs PDF copies of invoices from the last four quarters. No billing change is required, just document retrieval.",
+        "issue_type":  "general_inquiry",
+        "priority":  "low",
+        "assignment_group":  "license_ops",
+        "resolution_action":  "fulfill",
+        "ambiguity_note":  "The request is informational, but license operations owns the archived invoice records and can fulfill it directly.",
+        "related_ticket_id":  null
+    },
+    {
+        "ticket_id":  "ticket-055",
+        "title":  "Re: Renewal credit memo requires contract amendment approval",
+        "requester":  "procurement@crownlogistics.com",
+        "description":  "Following up on ticket-051. Quarter close is tomorrow and the contract amendment is still pending, so the corrected invoice cannot be issued yet.",
+        "issue_type":  "billing_license",
+        "priority":  "high",
+        "assignment_group":  "procurement",
+        "resolution_action":  "escalate",
+        "ambiguity_note":  null,
+        "related_ticket_id":  "ticket-051"
     }
 ]
 

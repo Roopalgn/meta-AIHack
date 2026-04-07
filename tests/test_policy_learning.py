@@ -32,6 +32,7 @@ from policy_learning import (
     POLICY_LIBRARY,
     choose_policy_action,
     compare_policies,
+    infer_ticket_cue,
     parse_int_spec,
     rollout_episode,
     search_policies,
@@ -99,35 +100,55 @@ class PolicyLearningTests(unittest.TestCase):
         observation = HelpdeskTicketObservation(
             current_ticket={
                 "ticket_id": "ticket-021",
+                "title": "Re: Production checkout throwing null reference exception",
+                "description": "Additional routing context is available via investigation.",
                 "context_status": {
-                    "remaining_tools": ["lookup_related_ticket", "lookup_requester_history"],
-                    "revealed_tools": [],
+                    "hidden_context_remaining": True,
+                    "context_gap_count": 2,
+                    "revealed_context_count": 0,
+                    "context_completeness": 0.0,
                 }
             },
             allowed_fields=["issue_type"],
         )
 
-        action, source = choose_policy_action(policy, observation, {}, _context_sensitive_submit_builder)
+        action, source, cue = choose_policy_action(
+            policy,
+            observation,
+            {},
+            _context_sensitive_submit_builder,
+            used_tools_by_ticket={},
+        )
 
         self.assertEqual(action.action_type, "investigate")
         self.assertEqual(action.tool_name, "lookup_related_ticket")
         self.assertEqual(source, "investigate_hidden_context")
+        self.assertEqual(cue, "follow_up")
 
     def test_choose_policy_action_submits_when_investigation_disabled(self) -> None:
         policy = POLICY_LIBRARY["no_investigation"]
         observation = HelpdeskTicketObservation(
             current_ticket={
                 "ticket_id": "ticket-021",
-                "context_status": {"remaining_tools": ["lookup_related_ticket"]},
+                "title": "Re: Production checkout throwing null reference exception",
+                "description": "Additional routing context is available via investigation.",
+                "context_status": {"hidden_context_remaining": True, "context_gap_count": 1},
             },
             allowed_fields=["issue_type", "priority"],
         )
 
-        action, source = choose_policy_action(policy, observation, {}, _context_sensitive_submit_builder)
+        action, source, cue = choose_policy_action(
+            policy,
+            observation,
+            {},
+            _context_sensitive_submit_builder,
+            used_tools_by_ticket={},
+        )
 
         self.assertEqual(action.action_type, "submit")
         self.assertEqual(action.issue_type, "identity_access")
         self.assertEqual(source, "submit")
+        self.assertIsNone(cue)
 
     def test_rollout_episode_rewards_context_aware_policy(self) -> None:
         no_investigation = POLICY_LIBRARY["no_investigation"]
@@ -152,11 +173,11 @@ class PolicyLearningTests(unittest.TestCase):
         self.assertLess(no_summary["normalized_return"], context_summary["normalized_return"])
         self.assertEqual(context_summary["investigation_steps"], 1)
 
-    def test_search_policies_selects_better_policy(self) -> None:
+    def test_search_policies_selects_adaptive_policy(self) -> None:
         report = search_policies(
             [
                 POLICY_LIBRARY["no_investigation"],
-                POLICY_LIBRARY["investigate_when_context_hidden"],
+                POLICY_LIBRARY["adaptive_cue_bandit"],
             ],
             train_seeds=[41, 42],
             eval_seeds=[43],
@@ -166,17 +187,18 @@ class PolicyLearningTests(unittest.TestCase):
             submit_builder=_context_sensitive_submit_builder,
         )
 
-        self.assertEqual(report["selected_policy"], "investigate_when_context_hidden")
+        self.assertEqual(report["selected_policy"], "adaptive_cue_bandit")
         self.assertGreater(
             report["eval_improvement_vs_baseline"]["avg_normalized_return"],
             0.0,
         )
+        self.assertIn("adaptive_cue_bandit", report["trained_adaptive_bandits"])
 
     def test_compare_policies_reports_improvement(self) -> None:
         report = compare_policies(
             [
                 POLICY_LIBRARY["no_investigation"],
-                POLICY_LIBRARY["investigate_when_context_hidden"],
+                POLICY_LIBRARY["adaptive_cue_bandit"],
             ],
             seeds=[42],
             task_ids=[3],
@@ -185,8 +207,17 @@ class PolicyLearningTests(unittest.TestCase):
             submit_builder=_context_sensitive_submit_builder,
         )
 
-        self.assertEqual(report["best_policy"], "investigate_when_context_hidden")
+        self.assertEqual(report["best_policy"], "adaptive_cue_bandit")
         self.assertGreater(report["improvement_vs_baseline"]["avg_terminal_reward"], 0.0)
+
+    def test_infer_ticket_cue_distinguishes_workflow_blocker(self) -> None:
+        cue = infer_ticket_cue(
+            {
+                "title": "Contractor onboarding blocked by access issue",
+                "description": "A contractor onboarding workflow is blocked by a permissions error.",
+            }
+        )
+        self.assertEqual(cue, "workflow_blocker")
 
 
 if __name__ == "__main__":

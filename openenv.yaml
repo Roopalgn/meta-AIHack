@@ -32,7 +32,11 @@ api:
     - /reset
     - /step
     - /state
+    - /ws
     - /tasks
+    - /web
+    - /baseline
+    - /grader
     - /docs
 
 evaluation:
@@ -51,9 +55,13 @@ inference:
   env_vars:
     - API_BASE_URL
     - MODEL_NAME
+    - API_KEY
     - HF_TOKEN
     - ENV_URL
     - TASK_ID
+    - SEED
+    - RUN_ALL_TASKS
+    - LOCAL_IMAGE_NAME
 
 requirements:
   python: ">=3.11"

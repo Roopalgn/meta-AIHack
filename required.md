@@ -154,11 +154,12 @@ All of these must pass:
 
 ### Required inference environment variables
 
-- `API_BASE_URL`
-- `MODEL_NAME`
-- `HF_TOKEN`
+  - `API_BASE_URL`
+  - `MODEL_NAME`
+  - `API_KEY`
+  - `HF_TOKEN`
 
-The official text also mentions `OPENAI_API_KEY` in one place, but the more specific submission instructions above consistently emphasize `API_BASE_URL`, `MODEL_NAME`, and `HF_TOKEN`. We should follow the later, more specific instruction while continuing to use the OpenAI client.
+Use `API_KEY` as the primary evaluator-injected credential for the OpenAI client. `HF_TOKEN` can remain as a backward-compatible local fallback, but submission-time LLM traffic should flow through the injected proxy key.
 
 ### Inference script constraints
 
@@ -302,7 +303,7 @@ The project keeps three tasks:
 ### Inference
 
 - heuristic mode works without model credentials
-- LLM mode reads `API_BASE_URL`, `MODEL_NAME`, and `HF_TOKEN`
+- LLM mode reads `API_BASE_URL`, `MODEL_NAME`, and `API_KEY` (`HF_TOKEN` remains a local fallback)
 - uses the OpenAI client
 - stdout follows `[START]`, `[STEP]`, and `[END]`
 - output is reproducible when the seed is fixed

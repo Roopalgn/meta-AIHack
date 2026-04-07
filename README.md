@@ -383,9 +383,10 @@ TASK_ID=3 python inference.py
 
 Set these environment variables first:
 
-- `API_BASE_URL`
-- `MODEL_NAME`
-- `HF_TOKEN`
+  - `API_BASE_URL`
+  - `MODEL_NAME`
+  - `API_KEY`
+  - `HF_TOKEN`
 
 Then run:
 

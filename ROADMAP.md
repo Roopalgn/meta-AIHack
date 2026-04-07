@@ -130,7 +130,7 @@ These come directly from `required.md` and `KNOWLEDGE.md`:
 - 3 tasks exist and remain meaningfully different
 - grader scores stay in `[0.0, 1.0]`
 - `inference.py` runs reproducibly without crashing
-- `inference.py` uses the OpenAI client with `API_BASE_URL`, `MODEL_NAME`, and `HF_TOKEN`
+- `inference.py` uses the OpenAI client with `API_BASE_URL`, `MODEL_NAME`, and the evaluator-injected `API_KEY` (`HF_TOKEN` remains a local fallback)
 - structured stdout logs follow the official `[START]`, `[STEP]`, and `[END]` format
 - `openenv validate` passes
 - Docker builds and starts cleanly

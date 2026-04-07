@@ -13,8 +13,15 @@ from models import (
     HelpdeskTicketState,
 )
 from server.grader import grade_action
-from server.reward import compute_step_reward, compute_trajectory_reward
+from server.reward import (
+    compute_step_adjustments,
+    compute_trajectory_adjustments,
+)
 from server.tasks import get_task_definition, load_dataset
+from vocabulary import (
+    ISSUE_TYPE_TO_ASSIGNMENT_GROUP,
+    ISSUE_TYPE_TO_RESOLUTION_ACTION,
+)
 
 
 QUEUE_SIZE_RANGE = (3, 5)
@@ -29,6 +36,12 @@ EXTRA_INVESTIGATION_COST = 0.02
 MAX_EXTRA_INVESTIGATION_PENALTY = 0.15
 USEFUL_INVESTIGATION_REWARD = 0.08
 PREMATURE_SUBMIT_PENALTY = 0.10
+CONTEXT_COMPLETION_BONUS = 0.04
+TRAJECTORY_CONTEXT_COMPLETION_BONUS = 0.03
+PRIORITY_UNDERSHOOT_PENALTY = 0.03
+SEVERE_PRIORITY_UNDERSHOOT_PENALTY = 0.07
+DANGEROUS_RESOLUTION_PENALTY = 0.05
+NONDEFAULT_ROUTING_FOLLOWTHROUGH_BONUS = 0.02
 
 TASK3_INVESTIGATION_TOOL_PLAN: dict[str, tuple[str, ...]] = {
     "ticket-021": ("lookup_related_ticket", "lookup_requester_history"),
@@ -190,11 +203,16 @@ class HelpdeskTicketRoutingEnvironment(
             is_done = self._state.current_ticket_index >= len(self._queue)
             self._state.done = is_done
             trajectory_reward = None
+            trajectory_components = None
             investigation_penalty = self._compute_episode_penalty() if is_done else 0.0
             if is_done:
-                trajectory_reward = compute_trajectory_reward(
-                    self._state.per_ticket_scores, len(self._queue), self._state.step_count
+                trajectory_components = compute_trajectory_adjustments(
+                    self._state.per_ticket_scores,
+                    len(self._queue),
+                    self._state.step_count,
+                    completion_bonus=self._trajectory_consistency_bonus(),
                 )
+                trajectory_reward = trajectory_components["final_reward"]
                 final_reward = self._apply_episode_economics(trajectory_reward)
                 self._state.total_reward = final_reward
             else:
@@ -208,6 +226,23 @@ class HelpdeskTicketRoutingEnvironment(
                 trajectory_reward=trajectory_reward,
                 investigation_penalty=investigation_penalty,
                 penalty_reason=f"extra_fields: {sorted(extra_fields)}",
+                extra_details={
+                    "trajectory_average_reward": (
+                        trajectory_components["average_reward"]
+                        if trajectory_components is not None
+                        else None
+                    ),
+                    "trajectory_completion_bonus": (
+                        trajectory_components["completion_bonus"]
+                        if trajectory_components is not None
+                        else None
+                    ),
+                    "trajectory_consistency_bonus": (
+                        trajectory_components["consistency_bonus"]
+                        if trajectory_components is not None
+                        else None
+                    ),
+                },
             )
             self._state.history_entries.append(
                 self._build_history_entry(
@@ -235,13 +270,30 @@ class HelpdeskTicketRoutingEnvironment(
                 rubric_reward=final_reward if is_done else None,
             )
 
+        previous_average = self._current_average_score()
         score, breakdown = grade_action(action, current_ticket, task_id)
-        step_reward = compute_step_reward(score)
-        context_penalty, missing_required_tools = self._submit_context_penalty(current_ticket)
-        milestone_adjustment = step_reward - score
+        context_penalty, missing_required_count = self._submit_context_penalty(current_ticket)
+        process_bonus = self._context_completion_bonus(
+            current_ticket,
+            missing_required_count=missing_required_count,
+            score=score,
+        )
+        risk_penalty = self._operational_risk_penalty(
+            current_ticket,
+            action,
+            task_id=task_id,
+        )
+        step_adjustments = compute_step_adjustments(
+            score,
+            previous_average=previous_average,
+            process_bonus=process_bonus,
+            risk_penalty=risk_penalty,
+        )
+        step_reward = step_adjustments["final_reward"]
 
         is_done = (self._state.current_ticket_index + 1) >= len(self._queue)
         trajectory_reward = None
+        trajectory_components = None
         investigation_penalty = 0.0
         rubric_reward = None
 
@@ -250,11 +302,13 @@ class HelpdeskTicketRoutingEnvironment(
             self._state.average_score_so_far = self._current_average_score()
             self._state.step_count += 1
             self._state.current_ticket_index += 1
-            trajectory_reward = compute_trajectory_reward(
+            trajectory_components = compute_trajectory_adjustments(
                 self._state.per_ticket_scores,
                 len(self._queue),
                 self._state.step_count,
+                completion_bonus=self._trajectory_consistency_bonus(),
             )
+            trajectory_reward = trajectory_components["final_reward"]
             rubric_reward = self._apply_episode_economics(trajectory_reward)
             final_reward = max(0.0, min(1.0, rubric_reward - context_penalty))
             self._state.total_reward = rubric_reward
@@ -272,14 +326,35 @@ class HelpdeskTicketRoutingEnvironment(
             shaped_step_reward=step_reward,
             reward_kind="trajectory" if is_done else "step",
             final_reward=final_reward,
-            milestone_adjustment=milestone_adjustment,
+            milestone_adjustment=step_adjustments["milestone_adjustment"],
             trajectory_reward=trajectory_reward,
             investigation_penalty=investigation_penalty,
             extra_details={
                 "context_gap_penalty": context_penalty,
-                "required_tools": self._required_tools_for_ticket(current_ticket),
-                "remaining_required_tools": missing_required_tools,
+                "context_completion_bonus": process_bonus,
+                "risk_penalty": risk_penalty,
+                "delta_adjustment": step_adjustments["delta_adjustment"],
+                "required_investigation_count": len(self._required_tools_for_ticket(current_ticket)),
+                "hidden_context_remaining_count": missing_required_count,
+                "hidden_context_revealed_count": len(
+                    self._used_tools_for_ticket(current_ticket.ticket_id)
+                ),
                 "rubric_reward": rubric_reward,
+                "trajectory_average_reward": (
+                    trajectory_components["average_reward"]
+                    if trajectory_components is not None
+                    else None
+                ),
+                "trajectory_completion_bonus": (
+                    trajectory_components["completion_bonus"]
+                    if trajectory_components is not None
+                    else None
+                ),
+                "trajectory_consistency_bonus": (
+                    trajectory_components["consistency_bonus"]
+                    if trajectory_components is not None
+                    else None
+                ),
             },
         )
 
@@ -335,6 +410,35 @@ class HelpdeskTicketRoutingEnvironment(
             return 0.0
         return sum(self._state.per_ticket_scores) / len(self._state.per_ticket_scores)
 
+    def _ticket_has_nondefault_routing(self, ticket: HelpdeskTicketRecord) -> bool:
+        return (
+            ticket.assignment_group
+            != ISSUE_TYPE_TO_ASSIGNMENT_GROUP.get(ticket.issue_type, ticket.assignment_group)
+            or ticket.resolution_action
+            != ISSUE_TYPE_TO_RESOLUTION_ACTION.get(
+                ticket.issue_type, ticket.resolution_action
+            )
+        )
+
+    def _ticket_mentions_follow_up(self, ticket: HelpdeskTicketRecord) -> bool:
+        text = f"{ticket.title} {ticket.description}".lower()
+        return any(
+            phrase in text
+            for phrase in (
+                "re:",
+                "follow-up",
+                "following up",
+                "still",
+                "third update",
+                "reference ticket",
+                "regression",
+                "unresolved",
+            )
+        )
+
+    def _ticket_repeated_requester_count(self, ticket: HelpdeskTicketRecord) -> int:
+        return sum(1 for candidate in self._dataset if candidate.requester == ticket.requester)
+
     def _required_tools_for_ticket(
         self,
         ticket: HelpdeskTicketRecord,
@@ -343,7 +447,25 @@ class HelpdeskTicketRoutingEnvironment(
         resolved_task_id = self._state.current_task_id if task_id is None else task_id
         if resolved_task_id != 3:
             return []
-        return list(TASK3_INVESTIGATION_TOOL_PLAN.get(ticket.ticket_id, ()))
+        required_tools: list[str] = list(TASK3_INVESTIGATION_TOOL_PLAN.get(ticket.ticket_id, ()))
+        if ticket.related_ticket_id is not None and "lookup_related_ticket" not in required_tools:
+            required_tools.append("lookup_related_ticket")
+        if (
+            ticket.ambiguity_note is not None or self._ticket_has_nondefault_routing(ticket)
+        ) and "lookup_internal_routing_note" not in required_tools:
+            required_tools.append("lookup_internal_routing_note")
+        if (
+            self._ticket_repeated_requester_count(ticket) >= 2
+            and (
+                ticket.related_ticket_id is not None
+                or self._ticket_mentions_follow_up(ticket)
+                or self._ticket_has_nondefault_routing(ticket)
+                or ticket.priority in {"high", "critical"}
+            )
+            and "lookup_requester_history" not in required_tools
+        ):
+            required_tools.append("lookup_requester_history")
+        return required_tools
 
     def _used_tools_for_ticket(self, ticket_id: str) -> list[str]:
         return list(self._state.ticket_tool_usage.get(ticket_id, []))
@@ -362,35 +484,122 @@ class HelpdeskTicketRoutingEnvironment(
         if tool_name not in used:
             used.append(tool_name)
 
-    def _investigation_hints_for_ticket(self, ticket: HelpdeskTicketRecord) -> list[str]:
-        hints: list[str] = []
+    def _tool_progress_for_ticket(self, ticket: HelpdeskTicketRecord) -> dict[str, Any]:
+        required_tools = self._required_tools_for_ticket(ticket)
+        revealed_tools = self._used_tools_for_ticket(ticket.ticket_id)
         remaining_tools = self._remaining_tools_for_ticket(ticket)
-        if "lookup_internal_routing_note" in remaining_tools:
-            hints.append("An internal routing note may disambiguate the correct workflow.")
-        if "lookup_related_ticket" in remaining_tools:
-            hints.append("A linked prior ticket can reveal important follow-up context.")
-        if "lookup_requester_history" in remaining_tools:
-            hints.append("Requester history may clarify severity or routing intent.")
-        return hints
+        total_required = max(1, len(required_tools))
+        return {
+            "required_tools": required_tools,
+            "revealed_tools": revealed_tools,
+            "remaining_tools": remaining_tools,
+            "revealed_count": len(revealed_tools),
+            "remaining_count": len(remaining_tools),
+            "completeness": round(len(revealed_tools) / total_required, 2),
+        }
+
+    def _default_redacted_description(self, ticket: HelpdeskTicketRecord) -> str:
+        if ticket.related_ticket_id is not None:
+            return (
+                "This is a follow-up operational issue that references prior work. "
+                "Additional routing context is available via investigation."
+            )
+        if ticket.ambiguity_note is not None:
+            return (
+                "This ticket mixes multiple plausible workflows. "
+                "Additional routing context is available via investigation."
+            )
+        if self._ticket_has_nondefault_routing(ticket):
+            return (
+                "The visible request looks straightforward, but the decisive routing "
+                "detail is hidden until investigation."
+            )
+        return (
+            "Additional routing context is available via investigation before final submission."
+        )
 
     def _visible_description(self, ticket: HelpdeskTicketRecord) -> str:
-        if (
-            self._state.current_task_id == 3
-            and self._remaining_tools_for_ticket(ticket)
-            and ticket.ticket_id in HARD_TASK_DESCRIPTION_REDACTIONS
-        ):
-            return HARD_TASK_DESCRIPTION_REDACTIONS[ticket.ticket_id]
+        if self._state.current_task_id == 3 and self._remaining_tools_for_ticket(ticket):
+            return HARD_TASK_DESCRIPTION_REDACTIONS.get(
+                ticket.ticket_id,
+                self._default_redacted_description(ticket),
+            )
         return ticket.description
 
-    def _submit_context_penalty(self, ticket: HelpdeskTicketRecord) -> tuple[float, list[str]]:
-        required_tools = self._required_tools_for_ticket(ticket)
-        if not required_tools:
-            return 0.0, []
-        remaining_tools = self._remaining_tools_for_ticket(ticket)
-        if not remaining_tools:
-            return 0.0, []
-        penalty = PREMATURE_SUBMIT_PENALTY * (len(remaining_tools) / len(required_tools))
-        return penalty, remaining_tools
+    def _submit_context_penalty(self, ticket: HelpdeskTicketRecord) -> tuple[float, int]:
+        progress = self._tool_progress_for_ticket(ticket)
+        required_tools = progress["required_tools"]
+        remaining_tools = progress["remaining_tools"]
+        if not required_tools or not remaining_tools:
+            return 0.0, 0
+        penalty = PREMATURE_SUBMIT_PENALTY * (
+            len(remaining_tools) / max(1, len(required_tools))
+        )
+        return penalty, len(remaining_tools)
+
+    def _context_completion_bonus(
+        self,
+        ticket: HelpdeskTicketRecord,
+        *,
+        missing_required_count: int,
+        score: float,
+    ) -> float:
+        if not self._required_tools_for_ticket(ticket):
+            return 0.0
+        if missing_required_count != 0 or score < 0.75:
+            return 0.0
+        bonus = CONTEXT_COMPLETION_BONUS
+        if self._ticket_has_nondefault_routing(ticket):
+            bonus += NONDEFAULT_ROUTING_FOLLOWTHROUGH_BONUS
+        return bonus
+
+    def _trajectory_consistency_bonus(self) -> float:
+        if not self._queue:
+            return 0.0
+        hidden_context_tickets = [
+            ticket for ticket in self._queue if self._required_tools_for_ticket(ticket)
+        ]
+        if not hidden_context_tickets:
+            return 0.0
+        resolved = sum(
+            1 for ticket in hidden_context_tickets if not self._remaining_tools_for_ticket(ticket)
+        )
+        resolution_rate = resolved / len(hidden_context_tickets)
+        return round(TRAJECTORY_CONTEXT_COMPLETION_BONUS * resolution_rate, 4)
+
+    def _operational_risk_penalty(
+        self,
+        ticket: HelpdeskTicketRecord,
+        action: HelpdeskTicketAction,
+        *,
+        task_id: int,
+    ) -> float:
+        if task_id < 2 or action.priority is None:
+            priority_penalty = 0.0
+        else:
+            priority_rank = {"critical": 3, "high": 2, "medium": 1, "low": 0}
+            expected_rank = priority_rank.get(ticket.priority, 0)
+            predicted_rank = priority_rank.get(action.priority, 0)
+            gap = expected_rank - predicted_rank
+            if gap >= 2:
+                priority_penalty = SEVERE_PRIORITY_UNDERSHOOT_PENALTY
+            elif gap == 1 and ticket.priority in {"high", "critical"}:
+                priority_penalty = PRIORITY_UNDERSHOOT_PENALTY
+            else:
+                priority_penalty = 0.0
+
+        resolution_penalty = 0.0
+        if task_id == 3 and action.resolution_action is not None:
+            if (
+                ticket.issue_type in {"identity_access", "application_support", "security_compliance"}
+                and ticket.priority in {"high", "critical"}
+                and action.resolution_action == "acknowledge"
+            ):
+                resolution_penalty += DANGEROUS_RESOLUTION_PENALTY
+            if ticket.issue_type == "spam_phishing" and action.resolution_action == "fulfill":
+                resolution_penalty += PRIORITY_UNDERSHOOT_PENALTY
+
+        return round(priority_penalty + resolution_penalty, 4)
 
     def _build_reward_components(
         self,
@@ -547,6 +756,7 @@ class HelpdeskTicketRoutingEnvironment(
         self._state.reward = investigation_reward
         self._state.done = False
         self._state.investigation_penalty_applied = self._compute_episode_penalty()
+        progress = self._tool_progress_for_ticket(current_ticket)
         reward_components = self._build_reward_components(
             ticket_score=0.0,
             field_breakdown={},
@@ -556,8 +766,10 @@ class HelpdeskTicketRoutingEnvironment(
             investigation_penalty=self._state.investigation_penalty_applied,
             extra_details={
                 "new_context_revealed": useful_investigation,
-                "required_tools": required_tools,
-                "remaining_required_tools": self._remaining_tools_for_ticket(current_ticket),
+                "required_investigation_count": len(required_tools),
+                "hidden_context_remaining_count": progress["remaining_count"],
+                "hidden_context_revealed_count": progress["revealed_count"],
+                "context_completeness": progress["completeness"],
                 "tool_name": action.tool_name,
             },
         )
@@ -578,21 +790,22 @@ class HelpdeskTicketRoutingEnvironment(
         return self._build_observation(task, done=False, reward=investigation_reward)
 
     def _build_ticket_view(self, ticket: HelpdeskTicketRecord) -> dict[str, Any]:
-        required_tools = self._required_tools_for_ticket(ticket)
-        revealed_tools = self._used_tools_for_ticket(ticket.ticket_id)
-        remaining_tools = self._remaining_tools_for_ticket(ticket)
+        progress = self._tool_progress_for_ticket(ticket)
+        remaining_tools = progress["remaining_tools"]
         ticket_view: dict[str, Any] = {
             "ticket_id": ticket.ticket_id,
             "title": ticket.title,
             "requester": ticket.requester,
             "description": self._visible_description(ticket),
         }
-        if required_tools:
+        if progress["required_tools"]:
             ticket_view["context_status"] = {
                 "investigation_required": True,
-                "revealed_tools": revealed_tools,
-                "remaining_tools": remaining_tools,
-                "hints": self._investigation_hints_for_ticket(ticket),
+                "hidden_context_remaining": bool(progress["remaining_count"]),
+                "context_gap_count": progress["remaining_count"],
+                "revealed_context_count": progress["revealed_count"],
+                "context_completeness": progress["completeness"],
+                "investigations_used_for_ticket": progress["revealed_count"],
             }
         if ticket.ambiguity_note is not None and "lookup_internal_routing_note" not in remaining_tools:
             ticket_view["ambiguity_note"] = ticket.ambiguity_note
@@ -646,9 +859,19 @@ class HelpdeskTicketRoutingEnvironment(
             context_gap_penalty = reward_components.get("context_gap_penalty")
             if context_gap_penalty:
                 parts.append(f"context_gap_penalty={context_gap_penalty:.2f}")
-            remaining_required_tools = reward_components.get("remaining_required_tools") or []
-            if remaining_required_tools:
-                parts.append(f"missing_context={remaining_required_tools}")
+            hidden_context_remaining_count = reward_components.get(
+                "hidden_context_remaining_count"
+            )
+            if hidden_context_remaining_count:
+                parts.append(
+                    f"hidden_context_remaining={hidden_context_remaining_count}"
+                )
+            context_completion_bonus = reward_components.get("context_completion_bonus")
+            if context_completion_bonus:
+                parts.append(f"context_bonus={context_completion_bonus:.2f}")
+            risk_penalty = reward_components.get("risk_penalty")
+            if risk_penalty:
+                parts.append(f"risk_penalty={risk_penalty:.2f}")
 
         return "; ".join(parts)
 
@@ -667,8 +890,8 @@ class HelpdeskTicketRoutingEnvironment(
         tool_result: dict[str, Any] | None = None,
         reward_components: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        remaining_tools = self._remaining_tools_for_ticket(ticket)
-        revealed_tools = self._used_tools_for_ticket(ticket.ticket_id)
+        progress = self._tool_progress_for_ticket(ticket)
+        remaining_tools = progress["remaining_tools"]
         history_entry: dict[str, Any] = {
             "ticket_id": ticket.ticket_id,
             "title": ticket.title,
@@ -702,8 +925,13 @@ class HelpdeskTicketRoutingEnvironment(
             history_entry["tool_result"] = tool_result
         if reward_components is not None:
             history_entry["reward_components"] = reward_components
-        if revealed_tools:
-            history_entry["revealed_tools"] = revealed_tools
+        if progress["required_tools"]:
+            history_entry["context_progress"] = {
+                "hidden_context_remaining": bool(progress["remaining_count"]),
+                "context_gap_count": progress["remaining_count"],
+                "revealed_context_count": progress["revealed_count"],
+                "context_completeness": progress["completeness"],
+            }
         history_entry["feedback_summary"] = self._build_feedback_summary(
             predicted=predicted,
             score=score,
@@ -750,6 +978,10 @@ class HelpdeskTicketRoutingEnvironment(
             "has_ambiguity_note": bool(ticket_view and ticket_view.get("ambiguity_note")),
             "has_related_ticket_context": bool(
                 ticket_view and ticket_view.get("related_ticket_preview")
+            ),
+            "has_hidden_context": bool(
+                ticket_view
+                and (ticket_view.get("context_status") or {}).get("hidden_context_remaining")
             ),
             "action_mode": "investigate_or_submit",
             "available_action_types": list(AVAILABLE_ACTION_TYPES),

@@ -4,7 +4,7 @@ from __future__ import annotations
 import argparse
 import importlib
 import json
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from statistics import mean
 from typing import Any, Callable, Iterable
@@ -18,13 +18,13 @@ from vocabulary import TASK_IDS
 DEFAULT_COMPARE_POLICIES = (
     "no_investigation",
     "investigate_when_context_hidden",
+    "adaptive_cue_bandit",
 )
 DEFAULT_SEARCH_POLICIES = (
     "no_investigation",
     "legacy_single_probe",
     "investigate_when_context_hidden",
-    "context_chain",
-    "hybrid_context",
+    "adaptive_cue_bandit",
 )
 DEFAULT_OUTPUT_DIR = "analysis/policy_learning_runs"
 
@@ -40,11 +40,13 @@ class PolicyConfig:
     investigate_ambiguity_history: bool
     max_investigations_per_ticket: int
     description: str
+    strategy: str = "static"
 
 
 POLICY_LIBRARY: dict[str, PolicyConfig] = {
     "no_investigation": PolicyConfig(
         name="no_investigation",
+        strategy="static",
         investigate_hidden_context=False,
         investigate_related_ticket_hint=False,
         investigate_ambiguity_history=False,
@@ -53,6 +55,7 @@ POLICY_LIBRARY: dict[str, PolicyConfig] = {
     ),
     "legacy_single_probe": PolicyConfig(
         name="legacy_single_probe",
+        strategy="static",
         investigate_hidden_context=False,
         investigate_related_ticket_hint=True,
         investigate_ambiguity_history=True,
@@ -61,29 +64,104 @@ POLICY_LIBRARY: dict[str, PolicyConfig] = {
     ),
     "investigate_when_context_hidden": PolicyConfig(
         name="investigate_when_context_hidden",
+        strategy="static",
         investigate_hidden_context=True,
         investigate_related_ticket_hint=False,
         investigate_ambiguity_history=False,
         max_investigations_per_ticket=1,
-        description="Investigate once when the environment says context is hidden.",
+        description="Investigate once when the environment shows hidden-context pressure.",
     ),
-    "context_chain": PolicyConfig(
-        name="context_chain",
-        investigate_hidden_context=True,
-        investigate_related_ticket_hint=False,
-        investigate_ambiguity_history=False,
-        max_investigations_per_ticket=3,
-        description="Follow the environment's required-tool chain until context is revealed.",
-    ),
-    "hybrid_context": PolicyConfig(
-        name="hybrid_context",
+    "adaptive_cue_bandit": PolicyConfig(
+        name="adaptive_cue_bandit",
+        strategy="adaptive",
         investigate_hidden_context=True,
         investigate_related_ticket_hint=True,
         investigate_ambiguity_history=True,
         max_investigations_per_ticket=3,
-        description="Use hidden-context signals first, then legacy ambiguity hints.",
+        description=(
+            "Learn cue-conditioned tool preferences from investigation rewards on train seeds."
+        ),
     ),
 }
+
+AVAILABLE_TOOLS = (
+    "lookup_related_ticket",
+    "lookup_requester_history",
+    "lookup_internal_routing_note",
+)
+
+
+@dataclass
+class AdaptiveToolBandit:
+    exploration_rounds: int = 1
+    cue_tool_totals: dict[str, dict[str, float]] = field(default_factory=dict)
+    cue_tool_counts: dict[str, dict[str, int]] = field(default_factory=dict)
+    global_tool_totals: dict[str, float] = field(default_factory=dict)
+    global_tool_counts: dict[str, int] = field(default_factory=dict)
+
+    def choose_tool(self, cue: str, candidate_tools: list[str]) -> str:
+        for tool_name in candidate_tools:
+            if self.cue_tool_counts.get(cue, {}).get(tool_name, 0) < self.exploration_rounds:
+                return tool_name
+        return max(
+            candidate_tools,
+            key=lambda tool_name: (
+                self._cue_average(cue, tool_name),
+                self._global_average(tool_name),
+                -candidate_tools.index(tool_name),
+            ),
+        )
+
+    def record_reward(self, cue: str, tool_name: str, reward: float) -> None:
+        cue_totals = self.cue_tool_totals.setdefault(cue, {})
+        cue_counts = self.cue_tool_counts.setdefault(cue, {})
+        cue_totals[tool_name] = cue_totals.get(tool_name, 0.0) + reward
+        cue_counts[tool_name] = cue_counts.get(tool_name, 0) + 1
+        self.global_tool_totals[tool_name] = self.global_tool_totals.get(tool_name, 0.0) + reward
+        self.global_tool_counts[tool_name] = self.global_tool_counts.get(tool_name, 0) + 1
+
+    def export(self) -> dict[str, Any]:
+        return {
+            "exploration_rounds": self.exploration_rounds,
+            "cue_tool_averages": {
+                cue: {
+                    tool_name: round(self._cue_average(cue, tool_name), 6)
+                    for tool_name in sorted(tool_totals)
+                }
+                for cue, tool_totals in sorted(self.cue_tool_totals.items())
+            },
+            "global_tool_averages": {
+                tool_name: round(self._global_average(tool_name), 6)
+                for tool_name in sorted(self.global_tool_totals)
+            },
+        }
+
+    def frozen_copy(self) -> "AdaptiveToolBandit":
+        return AdaptiveToolBandit(
+            exploration_rounds=self.exploration_rounds,
+            cue_tool_totals={
+                cue: dict(tool_totals) for cue, tool_totals in self.cue_tool_totals.items()
+            },
+            cue_tool_counts={
+                cue: dict(tool_counts) for cue, tool_counts in self.cue_tool_counts.items()
+            },
+            global_tool_totals=dict(self.global_tool_totals),
+            global_tool_counts=dict(self.global_tool_counts),
+        )
+
+    def _cue_average(self, cue: str, tool_name: str) -> float:
+        total = self.cue_tool_totals.get(cue, {}).get(tool_name, 0.0)
+        count = self.cue_tool_counts.get(cue, {}).get(tool_name, 0)
+        if count == 0:
+            return self._global_average(tool_name)
+        return total / count
+
+    def _global_average(self, tool_name: str) -> float:
+        total = self.global_tool_totals.get(tool_name, 0.0)
+        count = self.global_tool_counts.get(tool_name, 0)
+        if count == 0:
+            return 0.0
+        return total / count
 
 
 def _dedupe_preserving_order(values: Iterable[int]) -> list[int]:
@@ -154,29 +232,199 @@ def default_submit_builder(
     return HelpdeskTicketAction(**candidate)
 
 
+def _routing_text(ticket: dict[str, Any]) -> str:
+    parts = [
+        str(ticket.get("title", "")),
+        str(ticket.get("description", "")),
+        str(ticket.get("ambiguity_note", "")),
+        json.dumps(ticket.get("last_tool_result") or {}, sort_keys=True),
+    ]
+    related_preview = ticket.get("related_ticket_preview") or {}
+    parts.extend(
+        [
+            str(related_preview.get("title", "")),
+            str(related_preview.get("description", "")),
+        ]
+    )
+    return " ".join(parts).lower()
+
+
+def infer_ticket_cue(ticket: dict[str, Any]) -> str:
+    text = _routing_text(ticket)
+    if any(
+        phrase in text
+        for phrase in ("re:", "follow-up", "following up", "regression", "reference ticket", "third update")
+    ):
+        return "follow_up"
+    if any(
+        phrase in text
+        for phrase in (
+            "pricing",
+            "quote",
+            "vendor offer",
+            "prorating",
+            "seat expansion",
+            "commercial",
+        )
+    ):
+        return "commercial_ambiguity"
+    if any(
+        phrase in text
+        for phrase in (
+            "onboarding",
+            "contractor",
+            "permissions error",
+            "blocked by an account problem",
+        )
+    ):
+        return "workflow_blocker"
+    if any(
+        phrase in text
+        for phrase in ("compliance scan", "vulnerability", "policy issue", "routing note")
+    ):
+        return "routing_note"
+    if any(
+        phrase in text
+        for phrase in ("still", "again", "overdue", "legal", "priority")
+    ):
+        return "history_pressure"
+    return "generic_hidden_context"
+
+
+def preferred_tool_order(
+    ticket: dict[str, Any],
+    *,
+    hidden_context_remaining: bool,
+) -> list[str]:
+    text = _routing_text(ticket)
+    last_tool_result = ticket.get("last_tool_result") or {}
+    last_tool_name = str(last_tool_result.get("tool_name", "") or "")
+
+    preferred_tools: list[str] = []
+    if last_tool_name == "lookup_related_ticket":
+        preferred_tools.append("lookup_requester_history")
+    if last_tool_name == "lookup_requester_history":
+        preferred_tools.append("lookup_internal_routing_note")
+
+    if any(
+        phrase in text
+        for phrase in ("re:", "follow-up", "following up", "regression", "reference ticket")
+    ) or ticket.get("related_ticket_id"):
+        preferred_tools.append("lookup_related_ticket")
+
+    if any(
+        phrase in text
+        for phrase in (
+            "pricing",
+            "quote",
+            "vendor offer",
+            "prorating",
+            "seat expansion",
+            "billing-style",
+            "compliance scan",
+            "vulnerability",
+            "onboarding workflow",
+            "permissions error",
+            "blocked by an account problem",
+        )
+    ):
+        preferred_tools.append("lookup_internal_routing_note")
+
+    if any(
+        phrase in text
+        for phrase in ("still", "again", "overdue", "legal", "third update", "priority")
+    ):
+        preferred_tools.append("lookup_requester_history")
+
+    if hidden_context_remaining:
+        preferred_tools.extend(
+            [
+                "lookup_internal_routing_note",
+                "lookup_related_ticket",
+                "lookup_requester_history",
+            ]
+        )
+
+    deduped_tools: list[str] = []
+    for tool_name in preferred_tools:
+        if tool_name not in deduped_tools:
+            deduped_tools.append(tool_name)
+    return deduped_tools
+
+
+def select_cue_based_tool(
+    ticket: dict[str, Any],
+    *,
+    hidden_context_remaining: bool,
+    used_tools: set[str],
+) -> str | None:
+    preferred_tools = preferred_tool_order(
+        ticket,
+        hidden_context_remaining=hidden_context_remaining,
+    )
+    for tool_name in preferred_tools:
+        if tool_name not in used_tools:
+            return tool_name
+    return None
+
+
 def choose_policy_action(
     policy: PolicyConfig,
     observation: HelpdeskTicketObservation,
     investigations_by_ticket: dict[str, int],
     submit_builder: SubmitBuilder,
-) -> tuple[HelpdeskTicketAction, str]:
+    *,
+    used_tools_by_ticket: dict[str, set[str]] | None = None,
+    adaptive_bandit: AdaptiveToolBandit | None = None,
+) -> tuple[HelpdeskTicketAction, str, str | None]:
     ticket = observation.current_ticket or {}
     ticket_id = str(ticket.get("ticket_id", ""))
     ticket_investigations = investigations_by_ticket.get(ticket_id, 0)
-    revealed_tools = set(((ticket.get("context_status") or {}).get("revealed_tools") or []))
-    remaining_tools = list(((ticket.get("context_status") or {}).get("remaining_tools") or []))
+    used_tools = set()
+    if used_tools_by_ticket is not None:
+        used_tools = set(used_tools_by_ticket.get(ticket_id, set()))
+    context_status = ticket.get("context_status") or {}
+    hidden_context_remaining = bool(context_status.get("hidden_context_remaining"))
 
     if ticket_investigations < policy.max_investigations_per_ticket:
-        if policy.investigate_hidden_context and remaining_tools:
-            tool_name = str(remaining_tools[0])
-            return (
-                HelpdeskTicketAction(action_type="investigate", tool_name=tool_name),
-                "investigate_hidden_context",
+        if policy.strategy == "adaptive" and adaptive_bandit is not None and hidden_context_remaining:
+            candidate_tools = [
+                tool_name
+                for tool_name in preferred_tool_order(
+                    ticket,
+                    hidden_context_remaining=hidden_context_remaining,
+                )
+                if tool_name not in used_tools
+            ]
+            if not candidate_tools:
+                candidate_tools = [
+                    tool_name for tool_name in AVAILABLE_TOOLS if tool_name not in used_tools
+                ]
+            if candidate_tools:
+                cue = infer_ticket_cue(ticket)
+                tool_name = adaptive_bandit.choose_tool(cue, candidate_tools)
+                return (
+                    HelpdeskTicketAction(action_type="investigate", tool_name=tool_name),
+                    "adaptive_bandit_investigate",
+                    cue,
+                )
+
+        if policy.investigate_hidden_context and hidden_context_remaining:
+            tool_name = select_cue_based_tool(
+                ticket,
+                hidden_context_remaining=hidden_context_remaining,
+                used_tools=used_tools,
             )
+            if tool_name is not None:
+                return (
+                    HelpdeskTicketAction(action_type="investigate", tool_name=tool_name),
+                    "investigate_hidden_context",
+                    infer_ticket_cue(ticket),
+                )
         if (
             policy.investigate_related_ticket_hint
             and ticket.get("related_ticket_id")
-            and "lookup_related_ticket" not in revealed_tools
+            and "lookup_related_ticket" not in used_tools
         ):
             return (
                 HelpdeskTicketAction(
@@ -184,11 +432,16 @@ def choose_policy_action(
                     tool_name="lookup_related_ticket",
                 ),
                 "investigate_related_ticket_hint",
+                infer_ticket_cue(ticket),
             )
         if (
             policy.investigate_ambiguity_history
-            and ticket.get("ambiguity_note")
-            and "lookup_requester_history" not in revealed_tools
+            and (
+                ticket.get("ambiguity_note")
+                or ticket.get("feedback_summary")
+                or hidden_context_remaining
+            )
+            and "lookup_requester_history" not in used_tools
         ):
             return (
                 HelpdeskTicketAction(
@@ -196,9 +449,10 @@ def choose_policy_action(
                     tool_name="lookup_requester_history",
                 ),
                 "investigate_ambiguity_history",
+                infer_ticket_cue(ticket),
             )
 
-    return submit_builder(ticket, list(observation.allowed_fields)), "submit"
+    return submit_builder(ticket, list(observation.allowed_fields)), "submit", None
 
 
 def rollout_episode(
@@ -208,27 +462,39 @@ def rollout_episode(
     seed: int,
     task_id: int,
     submit_builder: SubmitBuilder,
+    adaptive_bandit: AdaptiveToolBandit | None = None,
+    update_adaptive: bool = False,
 ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     task = get_task_definition(task_id)
     observation = env.reset(seed=seed, task_id=task_id)
     investigations_by_ticket: dict[str, int] = {}
+    used_tools_by_ticket: dict[str, set[str]] = {}
     episode_return = 0.0
     trajectories: list[dict[str, Any]] = []
 
     while not observation.done:
         ticket = observation.current_ticket or {}
         ticket_id = str(ticket.get("ticket_id", ""))
-        action, action_source = choose_policy_action(
+        action, action_source, action_cue = choose_policy_action(
             policy,
             observation,
             investigations_by_ticket,
             submit_builder,
+            used_tools_by_ticket=used_tools_by_ticket,
+            adaptive_bandit=adaptive_bandit,
         )
         next_observation = env.step(action)
         reward_value = float(next_observation.reward or 0.0)
         episode_return += reward_value
         if action.action_type == "investigate" and ticket_id:
             investigations_by_ticket[ticket_id] = investigations_by_ticket.get(ticket_id, 0) + 1
+            used_tools_by_ticket.setdefault(ticket_id, set()).add(str(action.tool_name))
+            if policy.strategy == "adaptive" and adaptive_bandit is not None and update_adaptive:
+                adaptive_bandit.record_reward(
+                    action_cue or infer_ticket_cue(ticket),
+                    str(action.tool_name),
+                    reward_value,
+                )
 
         history_entry = env.state.history_entries[-1] if env.state.history_entries else {}
         trajectories.append(
@@ -241,6 +507,7 @@ def rollout_episode(
                 "step_index": len(trajectories) + 1,
                 "ticket_id": history_entry.get("ticket_id", ticket_id),
                 "action_source": action_source,
+                "action_cue": action_cue,
                 "action": action.model_dump(exclude_none=True),
                 "step_reward": reward_value,
                 "rubric_reward": next_observation.rubric_reward,
@@ -280,6 +547,8 @@ def rollout_episode(
         "average_ticket_score": env.state.average_score_so_far,
         "per_ticket_scores": list(env.state.per_ticket_scores),
     }
+    if adaptive_bandit is not None and policy.strategy == "adaptive":
+        summary["learned_tool_values"] = adaptive_bandit.export()
     return summary, trajectories
 
 
@@ -352,6 +621,8 @@ def evaluate_policy(
     *,
     env_factory: EnvFactory = HelpdeskTicketRoutingEnvironment,
     submit_builder: SubmitBuilder = default_submit_builder,
+    adaptive_bandit: AdaptiveToolBandit | None = None,
+    update_adaptive: bool = False,
 ) -> dict[str, Any]:
     episode_summaries: list[dict[str, Any]] = []
     trajectories: list[dict[str, Any]] = []
@@ -365,16 +636,21 @@ def evaluate_policy(
                 seed=seed,
                 task_id=task_id,
                 submit_builder=submit_builder,
+                adaptive_bandit=adaptive_bandit,
+                update_adaptive=update_adaptive,
             )
             episode_summaries.append(summary)
             trajectories.extend(episode_trajectories)
 
-    return {
+    result = {
         "policy": policy.name,
         "summary": summarize_policy_episodes(policy, episode_summaries),
         "episodes": episode_summaries,
         "trajectories": trajectories,
     }
+    if adaptive_bandit is not None and policy.strategy == "adaptive":
+        result["adaptive_bandit"] = adaptive_bandit.export()
+    return result
 
 
 def _selection_tuple(summary: dict[str, Any]) -> tuple[float, float, float, float]:
@@ -416,16 +692,20 @@ def compare_policies(
     submit_builder: SubmitBuilder = default_submit_builder,
 ) -> dict[str, Any]:
     output_dir = Path(output_dir)
-    policy_runs = [
-        evaluate_policy(
-            policy,
-            seeds,
-            task_ids,
-            env_factory=env_factory,
-            submit_builder=submit_builder,
+    policy_runs = []
+    for policy in policies:
+        adaptive_bandit = AdaptiveToolBandit() if policy.strategy == "adaptive" else None
+        policy_runs.append(
+            evaluate_policy(
+                policy,
+                seeds,
+                task_ids,
+                env_factory=env_factory,
+                submit_builder=submit_builder,
+                adaptive_bandit=adaptive_bandit,
+                update_adaptive=policy.strategy == "adaptive",
+            )
         )
-        for policy in policies
-    ]
     best_run = select_best_policy(policy_runs)
     baseline_run = policy_runs[0]
 
@@ -461,6 +741,11 @@ def compare_policies(
                 reverse=True,
             )
         ],
+        "adaptive_bandits": {
+            run["policy"]: run["adaptive_bandit"]
+            for run in policy_runs
+            if "adaptive_bandit" in run
+        },
         "artifacts": {
             "summary": str(output_dir / "compare_summary.json"),
             "episodes": str(output_dir / "compare_episodes.jsonl"),
@@ -496,16 +781,22 @@ def search_policies(
     baseline_policy_name: str = "no_investigation",
 ) -> dict[str, Any]:
     output_dir = Path(output_dir)
-    train_runs = [
-        evaluate_policy(
+    train_runs = []
+    trained_bandits: dict[str, AdaptiveToolBandit] = {}
+    for policy in candidate_policies:
+        adaptive_bandit = AdaptiveToolBandit() if policy.strategy == "adaptive" else None
+        train_run = evaluate_policy(
             policy,
             train_seeds,
             task_ids,
             env_factory=env_factory,
             submit_builder=submit_builder,
+            adaptive_bandit=adaptive_bandit,
+            update_adaptive=policy.strategy == "adaptive",
         )
-        for policy in candidate_policies
-    ]
+        train_runs.append(train_run)
+        if adaptive_bandit is not None:
+            trained_bandits[policy.name] = adaptive_bandit.frozen_copy()
     selected_run = select_best_policy(train_runs)
     selected_policy = POLICY_LIBRARY[selected_run["policy"]]
     eval_selected = evaluate_policy(
@@ -514,6 +805,8 @@ def search_policies(
         task_ids,
         env_factory=env_factory,
         submit_builder=submit_builder,
+        adaptive_bandit=trained_bandits.get(selected_policy.name),
+        update_adaptive=False,
     )
 
     baseline_policy = POLICY_LIBRARY.get(baseline_policy_name, candidate_policies[0])
@@ -523,6 +816,8 @@ def search_policies(
         task_ids,
         env_factory=env_factory,
         submit_builder=submit_builder,
+        adaptive_bandit=trained_bandits.get(baseline_policy.name),
+        update_adaptive=False,
     )
 
     report = {
@@ -535,6 +830,9 @@ def search_policies(
         "selected_policy": selected_policy.name,
         "baseline_policy": baseline_policy.name,
         "train_policy_summaries": [run["summary"] for run in train_runs],
+        "trained_adaptive_bandits": {
+            name: bandit.export() for name, bandit in trained_bandits.items()
+        },
         "eval_selected_summary": eval_selected["summary"],
         "eval_baseline_summary": eval_baseline["summary"],
         "eval_improvement_vs_baseline": {

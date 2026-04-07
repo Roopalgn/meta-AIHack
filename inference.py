@@ -16,8 +16,12 @@ MODEL_NAME
     Model identifier to use for LLM inference.
     Default: ``<your-active-model>``
 
+API_KEY
+    Proxy/API authentication token injected by the evaluator.
+    No default is set.
+
 HF_TOKEN
-    HuggingFace authentication token for the LLM provider.
+    Backward-compatible local fallback alias for API_KEY.
     No default is set.
 
 TASK_ID
@@ -33,8 +37,9 @@ LOCAL_IMAGE_NAME
     Optional compatibility variable from the sample inference pattern.
     This script does not use ``from_docker_image()``, so the value is unused here.
 
-When both MODEL_NAME and HF_TOKEN are set explicitly, the script calls the LLM via the
-OpenAI-compatible API at API_BASE_URL. Otherwise it falls back to the deterministic
+When MODEL_NAME and API_KEY are set explicitly, the script calls the LLM via the
+OpenAI-compatible API at API_BASE_URL. For local compatibility, HF_TOKEN is accepted
+as a fallback alias for API_KEY. Otherwise it falls back to the deterministic
 heuristic baseline automatically.
 
 All stdout logs use the required structured tags: ``[START]``, ``[STEP]``, and ``[END]``.
@@ -83,6 +88,7 @@ def _get_int_env(name: str, default: int) -> int:
 API_BASE_URL = os.getenv("API_BASE_URL", DEFAULT_API_BASE_URL)
 MODEL_NAME = os.getenv("MODEL_NAME", DEFAULT_MODEL_NAME)
 HF_TOKEN = os.getenv("HF_TOKEN")
+API_KEY = os.getenv("API_KEY") or HF_TOKEN
 LOCAL_IMAGE_NAME = os.getenv("LOCAL_IMAGE_NAME")
 ENV_URL = os.getenv("ENV_URL", "http://localhost:7860")
 
@@ -100,12 +106,12 @@ RUN_ALL_TASKS_ENV = os.getenv("RUN_ALL_TASKS", "").strip().lower() in {
 
 
 def llm_mode_enabled() -> bool:
-    return bool(HF_TOKEN) and MODEL_NAME != DEFAULT_MODEL_NAME
+    return bool(API_KEY) and MODEL_NAME != DEFAULT_MODEL_NAME
 
 
 llm_client: OpenAI | None = None
 if llm_mode_enabled():
-    llm_client = OpenAI(base_url=API_BASE_URL, api_key=HF_TOKEN)
+    llm_client = OpenAI(base_url=API_BASE_URL, api_key=API_KEY)
 
 
 RECENT_HISTORY_LIMIT = 2
@@ -698,21 +704,108 @@ def should_investigate(ticket: dict, history: list[dict[str, Any]]) -> tuple[boo
     if not ticket:
         return False, None
     context_status = ticket.get("context_status") or {}
-    remaining_tools = context_status.get("remaining_tools") or []
-    if remaining_tools:
-        return True, str(remaining_tools[0])
     current_ticket_id = ticket.get("ticket_id")
+    prior_ticket_history = [
+        entry
+        for entry in history
+        if entry.get("ticket_id") == current_ticket_id
+    ]
     already_investigated = any(
         entry.get("ticket_id") == current_ticket_id
         and entry.get("predicted", {}).get("action_type") == "investigate"
         for entry in history
     )
-    if already_investigated:
+    investigations_used = sum(
+        1
+        for entry in prior_ticket_history
+        if entry.get("predicted", {}).get("action_type") == "investigate"
+    )
+    hidden_context_remaining = bool(context_status.get("hidden_context_remaining"))
+    if investigations_used >= 3:
         return False, None
-    if ticket.get("related_ticket_id"):
+
+    used_tools = {
+        entry.get("predicted", {}).get("tool_name")
+        for entry in prior_ticket_history
+        if entry.get("predicted", {}).get("action_type") == "investigate"
+    }
+    routing_text = build_routing_text(ticket)
+    last_tool_result = ticket.get("last_tool_result") or {}
+    last_tool_name = str(last_tool_result.get("tool_name", "") or "")
+
+    follow_up_signal = any(
+        phrase in routing_text
+        for phrase in (
+            "re:",
+            "follow-up",
+            "following up",
+            "regression",
+            "reference ticket",
+            "third update",
+            "still",
+            "unresolved",
+        )
+    )
+    routing_ambiguity_signal = any(
+        phrase in routing_text
+        for phrase in (
+            "billing-style",
+            "prorating",
+            "seat expansion",
+            "vendor offer",
+            "pricing",
+            "compliance scan",
+            "vulnerability",
+            "onboarding workflow",
+            "blocked by an account problem",
+            "permissions error",
+            "mixed workflow",
+        )
+    )
+    requester_history_signal = any(
+        phrase in routing_text
+        for phrase in (
+            "still haven't",
+            "third update",
+            "again",
+            "follow-up",
+            "priority",
+            "legal",
+            "overdue",
+            "escalating",
+        )
+    )
+
+    preferred_tools: list[str] = []
+    if last_tool_name == "lookup_related_ticket":
+        preferred_tools.append("lookup_requester_history")
+    if last_tool_name == "lookup_requester_history":
+        preferred_tools.append("lookup_internal_routing_note")
+    if follow_up_signal or ticket.get("related_ticket_id"):
+        preferred_tools.append("lookup_related_ticket")
+    if routing_ambiguity_signal or hidden_context_remaining:
+        preferred_tools.append("lookup_internal_routing_note")
+    if requester_history_signal:
+        preferred_tools.append("lookup_requester_history")
+    if hidden_context_remaining:
+        preferred_tools.extend(
+            [
+                "lookup_related_ticket",
+                "lookup_internal_routing_note",
+                "lookup_requester_history",
+            ]
+        )
+
+    for tool_name in preferred_tools:
+        if tool_name not in used_tools:
+            return True, tool_name
+
+    if already_investigated and not hidden_context_remaining:
+        return False, None
+    if ticket.get("ambiguity_note") and "lookup_internal_routing_note" not in used_tools:
+        return True, "lookup_internal_routing_note"
+    if ticket.get("related_ticket_id") and "lookup_related_ticket" not in used_tools:
         return True, "lookup_related_ticket"
-    if ticket.get("ambiguity_note"):
-        return True, "lookup_requester_history"
     return False, None
 
 

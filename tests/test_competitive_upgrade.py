@@ -245,27 +245,27 @@ class TestMilestoneRewardShaping(unittest.TestCase):
 
     def test_high_score_gets_bonus(self) -> None:
         # score=0.9 >= 0.8 threshold → base=0.9, bonus=0.05 → 0.95
-        result = compute_step_reward(0.9)
+        result = compute_step_reward(0.9, previous_average=0.9)
         self.assertAlmostEqual(result, 0.95, places=9)
 
     def test_low_score_gets_penalty(self) -> None:
         # score=0.1 < 0.2 threshold → base=0.1, penalty=0.05 → 0.05
-        result = compute_step_reward(0.1)
+        result = compute_step_reward(0.1, previous_average=0.1)
         self.assertAlmostEqual(result, 0.05, places=9)
 
     def test_mid_score_is_neutral(self) -> None:
         # score=0.5 is in [0.2, 0.8) → no shaping → 0.5
-        result = compute_step_reward(0.5)
+        result = compute_step_reward(0.5, previous_average=0.5)
         self.assertAlmostEqual(result, 0.5, places=9)
 
     def test_boundary_high_threshold_gets_bonus(self) -> None:
         # score=0.8 exactly → bonus applies → 0.85
-        result = compute_step_reward(0.8)
+        result = compute_step_reward(0.8, previous_average=0.8)
         self.assertAlmostEqual(result, 0.85, places=9)
 
     def test_boundary_low_threshold_is_neutral(self) -> None:
         # score=0.2 exactly → not < 0.2, so neutral → 0.2
-        result = compute_step_reward(0.2)
+        result = compute_step_reward(0.2, previous_average=0.2)
         self.assertAlmostEqual(result, 0.2, places=9)
 
     def test_reward_clamped_to_unit_interval(self) -> None:
@@ -273,6 +273,11 @@ class TestMilestoneRewardShaping(unittest.TestCase):
         result = compute_step_reward(1.0)
         self.assertLessEqual(result, 1.0)
         self.assertGreaterEqual(result, 0.0)
+
+    def test_improvement_delta_adds_small_bonus(self) -> None:
+        improved = compute_step_reward(0.7, previous_average=0.2)
+        flat = compute_step_reward(0.7, previous_average=0.7)
+        self.assertGreater(improved, flat)
 
     def test_zero_score_clamped_to_zero(self) -> None:
         # score=0.0 < 0.2 → base=0.0, penalty → max(0.0, -0.05) = 0.0
@@ -348,10 +353,8 @@ class TestAmbiguityNoteInObservation(unittest.TestCase):
         self.assertIsNotNone(obs.current_ticket)
         self.assertNotIn("ambiguity_note", obs.current_ticket)
         self.assertIn("context_status", obs.current_ticket)
-        self.assertIn(
-            "lookup_internal_routing_note",
-            obs.current_ticket["context_status"]["remaining_tools"],
-        )
+        self.assertTrue(obs.current_ticket["context_status"]["hidden_context_remaining"])
+        self.assertGreater(obs.current_ticket["context_status"]["context_gap_count"], 0)
 
         obs = env.step(
             HelpdeskTicketAction(
@@ -436,10 +439,8 @@ class TestRelatedTicketPreviewInObservation(unittest.TestCase):
         self.assertIsNotNone(obs.current_ticket)
         self.assertNotIn("related_ticket_preview", obs.current_ticket)
         self.assertIn("context_status", obs.current_ticket)
-        self.assertIn(
-            "lookup_related_ticket",
-            obs.current_ticket["context_status"]["remaining_tools"],
-        )
+        self.assertTrue(obs.current_ticket["context_status"]["hidden_context_remaining"])
+        self.assertGreater(obs.current_ticket["context_status"]["context_gap_count"], 0)
 
         obs = env.step(
             HelpdeskTicketAction(
@@ -766,8 +767,8 @@ class TestDatasetNonDefaultRouting(unittest.TestCase):
             if t.assignment_group != ISSUE_TYPE_TO_ASSIGNMENT_GROUP.get(t.issue_type)
         ]
         self.assertGreaterEqual(
-            len(non_default), 3,
-            f"Expected >= 3 non-default routing tickets, found {len(non_default)}: "
+            len(non_default), 10,
+            f"Expected >= 10 non-default routing tickets, found {len(non_default)}: "
             + str([(t.ticket_id, t.issue_type, t.assignment_group) for t in non_default])
         )
 

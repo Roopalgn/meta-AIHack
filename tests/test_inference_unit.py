@@ -129,7 +129,7 @@ class FakeEnvClient:
 
 
 class InferenceUnitTests(unittest.TestCase):
-    def test_hf_token_has_no_default_and_model_name_keeps_allowed_default(self) -> None:
+    def test_api_credentials_have_no_defaults_and_model_name_keeps_allowed_default(self) -> None:
         inference = _load_inference_module()
 
         self.assertEqual(
@@ -137,8 +137,21 @@ class InferenceUnitTests(unittest.TestCase):
             "https://router.huggingface.co/v1",
         )
         self.assertEqual(inference.MODEL_NAME, "<your-active-model>")
+        self.assertIsNone(inference.API_KEY)
         self.assertIsNone(inference.HF_TOKEN)
         self.assertFalse(inference.llm_mode_enabled())
+
+    def test_api_key_enables_llm_mode_without_hf_token(self) -> None:
+        inference = _load_inference_module(
+            {
+                "API_KEY": "validator-proxy-key",
+                "MODEL_NAME": "meta/test-model",
+            }
+        )
+
+        self.assertEqual(inference.API_KEY, "validator-proxy-key")
+        self.assertIsNone(inference.HF_TOKEN)
+        self.assertTrue(inference.llm_mode_enabled())
 
     def test_seed_env_override_is_respected(self) -> None:
         inference = _load_inference_module({"SEED": "7"})
@@ -199,9 +212,11 @@ class InferenceUnitTests(unittest.TestCase):
             "description": "Access permissions are blocking contractor setup.",
             "context_status": {
                 "investigation_required": True,
-                "revealed_tools": [],
-                "remaining_tools": ["lookup_internal_routing_note"],
-                "hints": ["An internal routing note may disambiguate the correct workflow."],
+                "hidden_context_remaining": True,
+                "context_gap_count": 1,
+                "revealed_context_count": 0,
+                "context_completeness": 0.0,
+                "investigations_used_for_ticket": 0,
             },
             "last_tool_result": {"tool_name": "lookup_requester_history", "found": False},
             "feedback_summary": "Ticket score=0.40; field_scores[issue_type=0.40]; reward=0.40",
@@ -475,24 +490,24 @@ class InferenceUnitTests(unittest.TestCase):
         self.assertEqual(merged["tickets_remaining"], 4)
         self.assertEqual(merged["last_tool_result"]["tool_name"], "lookup_requester_history")
 
-    def test_should_investigate_uses_remaining_tools_from_context_status(self) -> None:
+    def test_should_investigate_uses_hidden_context_and_ticket_cues(self) -> None:
         inference = _load_inference_module()
 
         investigate, tool_name = inference.should_investigate(
             {
-                "ticket_id": "ticket-021",
+                "ticket_id": "TKT-NONDEFAULT-003",
+                "title": "Contractor onboarding blocked by access issue",
+                "description": "Additional routing context is available via investigation.",
                 "context_status": {
-                    "remaining_tools": [
-                        "lookup_related_ticket",
-                        "lookup_requester_history",
-                    ]
-                },
+                    "hidden_context_remaining": True,
+                    "context_gap_count": 1,
+                }
             },
             [],
         )
 
         self.assertTrue(investigate)
-        self.assertEqual(tool_name, "lookup_related_ticket")
+        self.assertEqual(tool_name, "lookup_internal_routing_note")
 
 
 if __name__ == "__main__":
