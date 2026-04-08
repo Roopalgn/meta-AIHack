@@ -10,28 +10,39 @@ from vocabulary import TASK_IDS
 TASKS = {
     1: {
         "id": 1,
-        "name": "Issue Type Classification",
+        "name": "Guided Full Routing",
         "difficulty": "easy",
         "instructions": (
-            "Read the ticket and select the single best IT issue type. "
-            "You may investigate first, then submit a final routing answer."
+            "Perform full helpdesk routing by selecting issue type, priority, "
+            "assignment group, and resolution action. Easy-task episodes keep the "
+            "ticket text mostly visible and focus on grounded single-ticket routing."
         ),
-        "allowed_fields": ["issue_type"],
+        "allowed_fields": [
+            "issue_type",
+            "priority",
+            "assignment_group",
+            "resolution_action",
+        ],
     },
     2: {
         "id": 2,
-        "name": "Issue Type And Priority",
+        "name": "Contextual Full Routing",
         "difficulty": "medium",
         "instructions": (
-            "Read the ticket, select the best IT issue type, and estimate the "
-            "correct operational priority. If the observation includes ambiguity "
-            "or follow-up context, use it. You may investigate before you submit."
+            "Perform full helpdesk routing with partial observability. Some "
+            "tickets hide related-case, requester-history, or clarification "
+            "details until you investigate or request more information."
         ),
-        "allowed_fields": ["issue_type", "priority"],
+        "allowed_fields": [
+            "issue_type",
+            "priority",
+            "assignment_group",
+            "resolution_action",
+        ],
     },
     3: {
         "id": 3,
-        "name": "Full Ticket Routing",
+        "name": "Adaptive Queue Routing",
         "difficulty": "hard",
         "instructions": (
             "Perform full helpdesk routing by selecting the best issue type, "
@@ -40,9 +51,8 @@ TASKS = {
             "forecasts, and planning state when present. "
             "Some hard tickets intentionally hide decisive routing context until "
             "you investigate with the available tools, and some hard episodes also "
-            "require queue-level capacity planning across multiple tickets, so "
-            "premature or resource-greedy routing can underperform even when the "
-            "visible text looks plausible."
+            "require queue-level capacity planning, deferrals, incident management, "
+            "and recovery from downstream follow-up tickets."
         ),
         "allowed_fields": [
             "issue_type",
@@ -60,6 +70,10 @@ PLANNING_ROUTE_UPDATES: dict[str, dict] = {
             "If the application queue is saturated, billing operations can own the "
             "customer-facing charge review as a lower-fidelity fallback while the bug "
             "investigation continues separately."
+        ),
+        "customer_update_note": (
+            "Finance confirmed the unexpected charge landed immediately after the "
+            "integration outage and wants one accountable owner today."
         ),
         "alternate_issue_type": "billing_license",
         "alternate_assignment_group": "license_ops",
@@ -82,6 +96,10 @@ PLANNING_ROUTE_UPDATES: dict[str, dict] = {
             "Seat expansion is the preferred route, but license operations can still "
             "handle the prorating clarification when procurement is the bottleneck."
         ),
+        "customer_update_note": (
+            "The requester clarified that the blocker is both the seat increase and "
+            "the unexpected prorating language on the quote."
+        ),
         "alternate_issue_type": "billing_license",
         "alternate_assignment_group": "license_ops",
         "alternate_resolution_action": "fulfill",
@@ -91,6 +109,10 @@ PLANNING_ROUTE_UPDATES: dict[str, dict] = {
         "planning_note": (
             "The request can be treated either as roadmap feedback or as a support "
             "escalation if the operational impact is emphasized."
+        ),
+        "customer_update_note": (
+            "The requester says the missing behavior is now blocking a customer "
+            "rollout, so this may need operational ownership rather than product triage."
         ),
         "alternate_issue_type": "application_support",
         "alternate_priority": "high",
@@ -137,6 +159,10 @@ PLANNING_ROUTE_UPDATES: dict[str, dict] = {
         "planning_note": (
             "Security scheduling is ideal, but a compliance acknowledgement is still "
             "acceptable when the security team only needs to confirm the process."
+        ),
+        "customer_update_note": (
+            "The requester clarified they mainly need confirmed ownership and a date "
+            "for the review, not the review itself right now."
         ),
         "alternate_issue_type": "security_compliance",
         "alternate_resolution_action": "acknowledge",
@@ -192,6 +218,10 @@ CURATED_EXPANSION_RECORDS: list[dict] = [
             "Security still owns the privileged-access review, but service desk can "
             "collect chronology and prepare the packet if the security queue is jammed."
         ),
+        "customer_update_note": (
+            "Executives want a single incident bridge owner before the board packet is sent."
+        ),
+        "incident_recommended": True,
         "alternate_assignment_group": "service_desk",
         "alternate_resolution_action": "assign",
         "alternate_route_score_multiplier": 0.72,
@@ -253,6 +283,10 @@ CURATED_EXPANSION_RECORDS: list[dict] = [
             "Immediate operational execution is preferred. Procurement can still own the "
             "approval path if service-desk capacity is already depleted."
         ),
+        "customer_update_note": (
+            "The customer says the launch rehearsal will fail without a same-day answer."
+        ),
+        "incident_recommended": True,
         "alternate_assignment_group": "procurement",
         "alternate_resolution_action": "assign",
         "alternate_route_score_multiplier": 0.8,
@@ -273,6 +307,11 @@ CURATED_EXPANSION_RECORDS: list[dict] = [
             "Security owns the final unblock decision. If security is saturated, the "
             "application team can still take the first-response diagnostics path."
         ),
+        "customer_update_note": (
+            "The identity-risk lead confirmed users remain locked out and wants incident "
+            "coordination while the exception is reviewed."
+        ),
+        "incident_recommended": True,
         "alternate_issue_type": "application_support",
         "alternate_priority": "high",
         "alternate_assignment_group": "application_team",
@@ -397,6 +436,9 @@ CURATED_EXPANSION_RECORDS: list[dict] = [
         "planning_note": (
             "Application engineering is preferred because they own the evidence. Procurement "
             "can still coordinate the renewal communication if the evidence queue is saturated."
+        ),
+        "customer_update_note": (
+            "Commercial leadership needs one named owner for the blocked renewal before end of day."
         ),
         "alternate_issue_type": "service_request",
         "alternate_priority": "medium",

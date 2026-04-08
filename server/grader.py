@@ -64,13 +64,23 @@ PRIORITY_SCORES = {
 
 
 TASK_WEIGHTS = {
-    1: {"issue_type": 1.0},
-    2: {"issue_type": 0.6, "priority": 0.4},
+    1: {
+        "issue_type": 0.40,
+        "priority": 0.20,
+        "assignment_group": 0.20,
+        "resolution_action": 0.20,
+    },
+    2: {
+        "issue_type": 0.32,
+        "priority": 0.20,
+        "assignment_group": 0.24,
+        "resolution_action": 0.24,
+    },
     3: {
-        "issue_type": 0.35,
+        "issue_type": 0.30,
         "priority": 0.20,
         "assignment_group": 0.25,
-        "resolution_action": 0.20,
+        "resolution_action": 0.25,
     },
 }
 

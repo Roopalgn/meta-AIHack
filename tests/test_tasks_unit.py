@@ -23,18 +23,17 @@ class TasksAndDatasetUnitTests(unittest.TestCase):
         self.assertEqual(tuple(TASKS.keys()), TASK_IDS)
 
     def test_task_allowed_fields_match_expected_ladder(self) -> None:
-        self.assertEqual(get_task_definition(1)["allowed_fields"], ["issue_type"])
-        self.assertEqual(
-            get_task_definition(2)["allowed_fields"], ["issue_type", "priority"]
-        )
+        expected_fields = [
+            "issue_type",
+            "priority",
+            "assignment_group",
+            "resolution_action",
+        ]
+        self.assertEqual(get_task_definition(1)["allowed_fields"], expected_fields)
+        self.assertEqual(get_task_definition(2)["allowed_fields"], expected_fields)
         self.assertEqual(
             get_task_definition(3)["allowed_fields"],
-            [
-                "issue_type",
-                "priority",
-                "assignment_group",
-                "resolution_action",
-            ],
+            expected_fields,
         )
 
     def test_task_difficulty_ladder_is_frozen(self) -> None:

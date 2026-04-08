@@ -565,13 +565,16 @@ class TestInvestigationActions(unittest.TestCase):
 
     def test_submit_after_investigation_completes_episode(self) -> None:
         env, obs, ticket, related = self._make_linked_env()
-        env.step(
+        obs = env.step(
             HelpdeskTicketAction(
                 action_type="investigate",
                 tool_name="lookup_related_ticket",
                 tool_target_ticket_id=ticket.related_ticket_id,
             )
         )
+        operational_context = (obs.current_ticket or {}).get("operational_context", {})
+        if operational_context.get("incident_recommended"):
+            obs = env.step(HelpdeskTicketAction(action_type="open_incident"))
         final_obs = env.step(
             HelpdeskTicketAction(
                 issue_type=ticket.issue_type,
@@ -752,6 +755,7 @@ class TestTerminalInvalidActionFinalReward(unittest.TestCase):
 
     def test_last_invalid_submit_returns_trajectory_reward_not_zero(self) -> None:
         from unittest.mock import patch
+        from server.tasks import get_task_definition as base_get_task_definition
 
         dataset = load_dataset()
         first = dataset[0]
@@ -764,25 +768,40 @@ class TestTerminalInvalidActionFinalReward(unittest.TestCase):
                 "_tickets_by_id",
                 {first.ticket_id: first, second.ticket_id: second},
             ):
-                obs = env.reset(seed=0, task_id=1, queue_size=2)
+                with patch(
+                    "server.environment.get_task_definition",
+                    side_effect=lambda task_id: (
+                        {
+                            **base_get_task_definition(task_id),
+                            "allowed_fields": ["issue_type"],
+                        }
+                        if task_id == 1
+                        else base_get_task_definition(task_id)
+                    ),
+                ):
+                    obs = env.reset(seed=0, task_id=1, queue_size=2)
 
-        tickets_by_id = {first.ticket_id: first, second.ticket_id: second}
-        current = tickets_by_id[obs.current_ticket["ticket_id"]]
-        obs = env.step(HelpdeskTicketAction(issue_type=current.issue_type))
-        self.assertFalse(obs.done)
+                    tickets_by_id = {first.ticket_id: first, second.ticket_id: second}
+                    current = tickets_by_id[obs.current_ticket["ticket_id"]]
+                    obs = env.step(HelpdeskTicketAction(issue_type=current.issue_type))
+                    self.assertFalse(obs.done)
 
-        current = tickets_by_id[obs.current_ticket["ticket_id"]]
-        final_obs = env.step(
-            HelpdeskTicketAction(
-                issue_type=current.issue_type,
-                priority="medium",
-            )
-        )
+                    current = tickets_by_id[obs.current_ticket["ticket_id"]]
+                    final_obs = env.step(
+                        HelpdeskTicketAction(
+                            issue_type=current.issue_type,
+                            priority="medium",
+                        )
+                    )
 
-        self.assertTrue(final_obs.done)
-        self.assertAlmostEqual(final_obs.reward, 0.5, places=9)
-        self.assertAlmostEqual(env.state.total_reward, 0.5, places=9)
-        self.assertAlmostEqual(env.state.reward or 0.0, 0.5, places=9)
+                    self.assertTrue(final_obs.done)
+                    expected_average = sum(env.state.per_ticket_scores) / len(
+                        env.state.per_ticket_scores
+                    )
+                    self.assertGreater(final_obs.reward, 0.0)
+                    self.assertAlmostEqual(final_obs.reward, expected_average, places=9)
+                    self.assertAlmostEqual(env.state.total_reward, expected_average, places=9)
+                    self.assertAlmostEqual(env.state.reward or 0.0, expected_average, places=9)
 
 
 # ---------------------------------------------------------------------------

@@ -196,9 +196,11 @@ def format_recent_history_entries(
 def build_llm_user_message(ticket: dict, allowed_fields: list[str], instructions: str) -> str:
     ambiguity_note = ticket.get("ambiguity_note")
     planning_note = ticket.get("planning_note")
+    customer_update_note = ticket.get("customer_update_note")
     related_preview = ticket.get("related_ticket_preview") or {}
     last_tool_result = ticket.get("last_tool_result")
     context_status = ticket.get("context_status") or {}
+    operational_context = ticket.get("operational_context") or {}
     recent_history = ticket.get("recent_history") or []
     feedback_summary = ticket.get("feedback_summary")
     last_reward_components = ticket.get("last_reward_components") or {}
@@ -213,6 +215,8 @@ def build_llm_user_message(ticket: dict, allowed_fields: list[str], instructions
         extra_context_lines.append(f"Ambiguity note: {ambiguity_note}")
     if planning_note:
         extra_context_lines.append(f"Planning note: {planning_note}")
+    if customer_update_note:
+        extra_context_lines.append(f"Customer update: {customer_update_note}")
     if related_preview:
         extra_context_lines.extend(
             [
@@ -229,6 +233,10 @@ def build_llm_user_message(ticket: dict, allowed_fields: list[str], instructions
     if context_status:
         extra_context_lines.append(
             "Context status: " + json.dumps(context_status, sort_keys=True)
+        )
+    if operational_context:
+        extra_context_lines.append(
+            "Operational context: " + json.dumps(operational_context, sort_keys=True)
         )
     if capacity_state:
         extra_context_lines.append(
@@ -572,16 +580,19 @@ def build_routing_text(ticket: dict) -> str:
     related_preview = ticket.get("related_ticket_preview") or {}
     last_tool_result = ticket.get("last_tool_result") or {}
     routing_options = ticket.get("routing_options") or []
+    operational_context = ticket.get("operational_context") or {}
     return " ".join(
         [
             ticket.get("title", ""),
             ticket.get("description", ""),
             ticket.get("ambiguity_note", ""),
             ticket.get("planning_note", ""),
+            ticket.get("customer_update_note", ""),
             related_preview.get("title", ""),
             related_preview.get("description", ""),
             json.dumps(last_tool_result, sort_keys=True),
             json.dumps(routing_options, sort_keys=True),
+            json.dumps(operational_context, sort_keys=True),
             json.dumps(ticket.get("capacity_state") or {}, sort_keys=True),
             json.dumps(ticket.get("future_queue_demand") or {}, sort_keys=True),
         ]
@@ -909,9 +920,14 @@ def build_action(
         )
 
 
-def should_investigate(ticket: dict, history: list[dict[str, Any]]) -> tuple[bool, str | None]:
+def should_investigate(
+    ticket: dict,
+    history: list[dict[str, Any]],
+    available_tools: list[str] | None = None,
+) -> tuple[bool, str | None]:
     if not ticket:
         return False, None
+    available_tool_set = set(available_tools or [])
     context_status = ticket.get("context_status") or {}
     hidden_context_remaining = bool(context_status.get("hidden_context_remaining"))
     investigation_required = bool(context_status.get("investigation_required"))
@@ -945,6 +961,7 @@ def should_investigate(ticket: dict, history: list[dict[str, Any]]) -> tuple[boo
         tool_name
         for tool_name in context_status.get("recommended_tools", [])
         if tool_name not in used_tools
+        and (not available_tool_set or tool_name in available_tool_set)
     ]
     if hidden_context_remaining and recommended_tools:
         return True, recommended_tools[0]
@@ -1018,12 +1035,47 @@ def should_investigate(ticket: dict, history: list[dict[str, Any]]) -> tuple[boo
         )
 
     for tool_name in preferred_tools:
+        if available_tool_set and tool_name not in available_tool_set:
+            continue
         if tool_name not in used_tools:
             return True, tool_name
 
     if already_investigated and not hidden_context_remaining:
         return False, None
     return False, None
+
+
+def choose_operational_action(
+    ticket: dict,
+    history: list[dict[str, Any]],
+    available_action_types: list[str] | None = None,
+) -> tuple[HelpdeskTicketAction | None, str | None]:
+    if not ticket:
+        return None, None
+    operational_context = ticket.get("operational_context") or {}
+    recommended_actions = list(operational_context.get("recommended_actions") or [])
+    available_action_set = set(available_action_types or [])
+    current_ticket_id = ticket.get("ticket_id")
+    prior_ticket_history = [
+        entry for entry in history if entry.get("ticket_id") == current_ticket_id
+    ]
+    used_action_types = {
+        entry.get("predicted", {}).get("action_type")
+        for entry in prior_ticket_history
+        if entry.get("predicted")
+    }
+
+    for action_name in ("open_incident", "request_info", "defer"):
+        if action_name not in recommended_actions:
+            continue
+        if available_action_set and action_name not in available_action_set:
+            continue
+        if action_name in used_action_types:
+            continue
+        if action_name == "defer" and ticket.get("tickets_after_current", 0) <= 0:
+            continue
+        return HelpdeskTicketAction(action_type=action_name), action_name
+    return None, None
 
 
 def merge_ticket_context(ticket: dict, observation: Any) -> dict:
@@ -1033,6 +1085,7 @@ def merge_ticket_context(ticket: dict, observation: Any) -> dict:
     merged_ticket["recent_history"] = list(getattr(observation, "history", []))
     merged_ticket["queue_position"] = getattr(observation, "queue_position", None)
     merged_ticket["tickets_remaining"] = getattr(observation, "tickets_remaining", None)
+    merged_ticket["tickets_after_current"] = getattr(observation, "tickets_after_current", None)
     merged_ticket["investigation_budget_remaining"] = getattr(
         observation,
         "investigation_budget_remaining",
@@ -1040,6 +1093,10 @@ def merge_ticket_context(ticket: dict, observation: Any) -> dict:
     )
     merged_ticket["average_score_so_far"] = getattr(observation, "average_score_so_far", None)
     merged_ticket["progress_fraction"] = getattr(observation, "progress_fraction", None)
+    merged_ticket["available_tools"] = list(getattr(observation, "available_tools", []) or [])
+    merged_ticket["available_action_types"] = list(
+        getattr(observation, "available_action_types", []) or []
+    )
     merged_ticket["last_reward_components"] = dict(
         getattr(observation, "last_reward_components", {}) or {}
     )
@@ -1096,7 +1153,11 @@ def run() -> None:
                     break
 
                 while getattr(obs, "investigation_budget_remaining", 0) > 0:
-                    investigate, tool_name = should_investigate(ticket, obs.history)
+                    investigate, tool_name = should_investigate(
+                        ticket,
+                        obs.history,
+                        list(getattr(obs, "available_tools", []) or []),
+                    )
                     if not investigate or tool_name is None:
                         break
                     tool_action = HelpdeskTicketAction(
@@ -1129,6 +1190,26 @@ def run() -> None:
                     break
 
                 ticket_with_context = merge_ticket_context(ticket, obs)
+                operational_action, operational_source = choose_operational_action(
+                    ticket_with_context,
+                    obs.history,
+                    list(getattr(obs, "available_action_types", []) or []),
+                )
+                if operational_action is not None and operational_source is not None:
+                    result = sync_client.step(operational_action)
+                    obs = result.observation
+                    step_num += 1
+                    reward = float(result.reward or 0.0)
+                    if result.reward is not None:
+                        task_step_rewards.append(reward)
+                    log_step(
+                        step=step_num,
+                        action=operational_action,
+                        reward=reward,
+                        done=bool(result.done),
+                        error=operational_source,
+                    )
+                    continue
                 action, action_source, fallback_reason = build_action(
                     ticket_with_context,
                     obs.allowed_fields,

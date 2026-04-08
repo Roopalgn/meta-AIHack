@@ -171,7 +171,7 @@ class PolicyLearningTests(unittest.TestCase):
 
         self.assertLess(no_summary["terminal_reward"], context_summary["terminal_reward"])
         self.assertLess(no_summary["normalized_return"], context_summary["normalized_return"])
-        self.assertEqual(context_summary["investigation_steps"], 1)
+        self.assertGreaterEqual(context_summary["investigation_steps"], 1)
 
     def test_search_policies_selects_adaptive_policy(self) -> None:
         report = search_policies(

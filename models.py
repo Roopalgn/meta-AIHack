@@ -16,7 +16,13 @@ ISSUE_TYPE_SET = set(ISSUE_TYPES)
 PRIORITY_SET = set(PRIORITIES)
 ASSIGNMENT_GROUP_SET = set(ASSIGNMENT_GROUPS)
 RESOLUTION_ACTION_SET = set(RESOLUTION_ACTIONS)
-ACTION_TYPE_SET = {"submit", "investigate"}
+ACTION_TYPE_SET = {
+    "submit",
+    "investigate",
+    "request_info",
+    "defer",
+    "open_incident",
+}
 TOOL_NAME_SET = {"lookup_related_ticket", "lookup_requester_history"}
 TOOL_NAME_SET.add("lookup_internal_routing_note")
 TOOL_NAME_SET.add("lookup_queue_capacity_forecast")
@@ -54,6 +60,9 @@ class HelpdeskTicketRecord(BaseModel):
     alternate_assignment_group: Optional[str] = None
     alternate_resolution_action: Optional[str] = None
     alternate_route_score_multiplier: float = 0.0
+    customer_update_note: Optional[str] = None
+    incident_recommended: bool = False
+    generated_from_ticket_id: Optional[str] = None
 
     @field_validator("issue_type")
     @classmethod
@@ -203,4 +212,16 @@ class HelpdeskTicketState(State):
     escalation_slots_remaining: int = 0
     planning_penalty_total: float = 0.0
     capacity_pressure_tickets_resolved: int = 0
+    ticket_request_info_usage: dict[str, int] = Field(default_factory=dict)
+    ticket_defer_counts: dict[str, int] = Field(default_factory=dict)
+    open_incident_ticket_ids: list[str] = Field(default_factory=list)
+    incident_slots_initial: int = 0
+    incident_slots_remaining: int = 0
+    incident_actions_used: int = 0
+    incident_gap_total: float = 0.0
+    deferred_ticket_count: int = 0
+    sla_breach_count: int = 0
+    spawned_follow_up_ticket_ids: list[str] = Field(default_factory=list)
+    spawned_follow_up_source_ids: list[str] = Field(default_factory=list)
+    dynamic_queue_events: list[dict[str, Any]] = Field(default_factory=list)
     history_entries: list[dict] = Field(default_factory=list)

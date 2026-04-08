@@ -244,8 +244,10 @@ def _routing_text(ticket: dict[str, Any]) -> str:
         str(ticket.get("description", "")),
         str(ticket.get("ambiguity_note", "")),
         str(ticket.get("planning_note", "")),
+        str(ticket.get("customer_update_note", "")),
         json.dumps(ticket.get("last_tool_result") or {}, sort_keys=True),
         json.dumps(ticket.get("routing_options") or [], sort_keys=True),
+        json.dumps(ticket.get("operational_context") or {}, sort_keys=True),
         json.dumps(ticket.get("capacity_state") or {}, sort_keys=True),
         json.dumps(ticket.get("future_queue_demand") or {}, sort_keys=True),
     ]
@@ -265,6 +267,7 @@ def infer_ticket_cue(ticket: dict[str, Any]) -> str:
     if (
         ticket.get("planning_note")
         or ticket.get("routing_options")
+        or (ticket.get("operational_context") or {}).get("incident_recommended")
         or "lookup_queue_capacity_forecast"
         in (context_status.get("recommended_tools") or [])
         or any(
@@ -316,6 +319,8 @@ def infer_ticket_cue(ticket: dict[str, Any]) -> str:
         for phrase in ("still", "again", "overdue", "legal", "priority")
     ):
         return "history_pressure"
+    if any(phrase in text for phrase in ("incident", "outage", "lockout", "company-wide")):
+        return "incident_pressure"
     return "generic_hidden_context"
 
 
@@ -397,15 +402,52 @@ def select_cue_based_tool(
     *,
     hidden_context_remaining: bool,
     used_tools: set[str],
+    available_tools: set[str] | None = None,
 ) -> str | None:
     preferred_tools = preferred_tool_order(
         ticket,
         hidden_context_remaining=hidden_context_remaining,
     )
+    available_tool_set = set(available_tools or [])
     for tool_name in preferred_tools:
+        if available_tool_set and tool_name not in available_tool_set:
+            continue
         if tool_name not in used_tools:
             return tool_name
     return None
+
+
+def choose_operational_action(
+    ticket: dict[str, Any],
+    history: list[dict[str, Any]],
+    available_action_types: list[str] | None = None,
+) -> tuple[HelpdeskTicketAction | None, str | None]:
+    if not ticket:
+        return None, None
+    operational_context = ticket.get("operational_context") or {}
+    recommended_actions = list(operational_context.get("recommended_actions") or [])
+    available_action_set = set(available_action_types or [])
+    current_ticket_id = str(ticket.get("ticket_id", ""))
+    prior_ticket_history = [
+        entry for entry in history if entry.get("ticket_id") == current_ticket_id
+    ]
+    used_action_types = {
+        entry.get("predicted", {}).get("action_type")
+        for entry in prior_ticket_history
+        if entry.get("predicted")
+    }
+
+    for action_name in ("open_incident", "request_info", "defer"):
+        if action_name not in recommended_actions:
+            continue
+        if available_action_set and action_name not in available_action_set:
+            continue
+        if action_name in used_action_types:
+            continue
+        if action_name == "defer" and not ticket.get("tickets_after_current", 0):
+            continue
+        return HelpdeskTicketAction(action_type=action_name), action_name
+    return None, None
 
 
 def choose_policy_action(
@@ -425,6 +467,7 @@ def choose_policy_action(
         used_tools = set(used_tools_by_ticket.get(ticket_id, set()))
     context_status = ticket.get("context_status") or {}
     hidden_context_remaining = bool(context_status.get("hidden_context_remaining"))
+    available_tools = set(getattr(observation, "available_tools", []) or [])
 
     if ticket_investigations < policy.max_investigations_per_ticket:
         if policy.strategy == "adaptive" and adaptive_bandit is not None and hidden_context_remaining:
@@ -434,11 +477,13 @@ def choose_policy_action(
                     ticket,
                     hidden_context_remaining=hidden_context_remaining,
                 )
-                if tool_name not in used_tools
+                if tool_name not in used_tools and tool_name in available_tools
             ]
             if not candidate_tools:
                 candidate_tools = [
-                    tool_name for tool_name in AVAILABLE_TOOLS if tool_name not in used_tools
+                    tool_name
+                    for tool_name in AVAILABLE_TOOLS
+                    if tool_name not in used_tools and tool_name in available_tools
                 ]
             if candidate_tools:
                 cue = infer_ticket_cue(ticket)
@@ -454,6 +499,7 @@ def choose_policy_action(
                 ticket,
                 hidden_context_remaining=hidden_context_remaining,
                 used_tools=used_tools,
+                available_tools=available_tools,
             )
             if tool_name is not None:
                 return (
@@ -491,6 +537,14 @@ def choose_policy_action(
                 "investigate_ambiguity_history",
                 infer_ticket_cue(ticket),
             )
+
+    operational_action, operational_source = choose_operational_action(
+        ticket,
+        list(getattr(observation, "history", []) or []),
+        list(getattr(observation, "available_action_types", []) or []),
+    )
+    if operational_action is not None and operational_source is not None:
+        return operational_action, operational_source, infer_ticket_cue(ticket)
 
     return submit_builder(ticket, list(observation.allowed_fields)), "submit", None
 

@@ -25,7 +25,7 @@ If a judge reads only one short explanation, it should be this:
 
 - this environment models a real enterprise workflow, not a toy classification task
 - each ticket requires typed routing decisions that are easy to score deterministically
-- the task ladder moves cleanly from single-field classification to full operational routing
+- the task ladder now keeps full routing on every task and scales observability, queue pressure, and operational controls instead
 - the repo is small enough to rerun quickly and explicit enough to understand without hidden business logic
 
 ## What This Environment Simulates
@@ -34,9 +34,10 @@ The environment models a realistic helpdesk workflow:
 
 1. a new ticket enters the queue
 2. the agent reads the ticket title and description
-3. the agent may investigate with lightweight tools, then submit structured routing fields
-4. the grader assigns deterministic credit
-5. the environment advances to the next ticket until the queue is complete
+3. the agent may investigate, request more information, open an incident, defer the ticket, or submit a routing decision
+4. the queue state mutates: capacity shrinks, incidents stay open, deferred tickets return later, and poor handling can spawn follow-up tickets
+5. the grader assigns deterministic credit
+6. the environment advances until the queue is complete
 
 For hard-task tickets, the environment can now withhold decisive routing context until the agent uses the right investigation tool. That keeps the task from collapsing into one-shot classification and makes tool choice part of the policy.
 
@@ -45,7 +46,7 @@ This domain is useful for OpenEnv because it is operationally realistic, easy to
 ## Why This Is A Good Hackathon Domain
 
 - it reflects real enterprise support operations
-- the action space is structured and judge-friendly, with a small investigate-versus-submit split
+- the action space is structured and judge-friendly, but now includes meaningful operational controls beyond investigate-versus-submit
 - correctness can be scored deterministically
 - the hard task is meaningfully harder than the easy and medium tasks
 - the environment is small enough to rerun quickly
@@ -55,9 +56,9 @@ This domain is useful for OpenEnv because it is operationally realistic, easy to
 The project uses a queue-based episode model.
 
 - `reset()` samples a task and a queue of 3 to 5 tickets
-- `step()` lets the agent investigate or submit one ticket at a time
+- `step()` lets the agent investigate, request clarification, defer, open incidents, or submit one ticket at a time
 - `state()` exposes the internal episode snapshot
-- hard-task episodes also track queue-level capacity, alternate acceptable routes, and planning penalties across tickets
+- hard-task episodes also track queue-level capacity, incident slots, alternate acceptable routes, planning penalties, SLA pressure, and dynamic follow-up tickets across the queue
 - final evaluation is based on the queue outcome, not on isolated per-ticket classification alone
 
 The environment classes and vocabulary are intentionally frozen to keep collaboration and judging simple.
@@ -91,15 +92,15 @@ Artifacts are written to `analysis/policy_learning_runs/` by default:
 - `search_eval_episodes.jsonl`
 - `search_eval_trajectories.jsonl`
 
-The default submit policy inside this runner stays deterministic and local. It reuses the repo's heuristic routing logic plus planning-aware routing overrides, so the search loop can study both investigation policy and queue-aware submission quality without depending on external LLM latency or API cost.
+The default submit policy inside this runner stays deterministic and local. It reuses the repo's heuristic routing logic plus planning-aware routing overrides, and the policy loop can now also exercise operational actions such as `request_info`, `open_incident`, and `defer` without depending on external LLM latency or API cost.
 
 ## Task Ladder
 
 | ID | Name | Difficulty | Required Fields | What The Agent Must Do |
 |----|------|------------|-----------------|-------------------------|
-| 1 | Issue Type Classification | Easy | `issue_type` | classify the ticket into the best issue category |
-| 2 | Issue Type And Priority | Medium | `issue_type`, `priority` | classify the issue and estimate urgency |
-| 3 | Full Ticket Routing | Hard | `issue_type`, `priority`, `assignment_group`, `resolution_action` | perform full routing and next-step selection |
+| 1 | Guided Full Routing | Easy | `issue_type`, `priority`, `assignment_group`, `resolution_action` | route a mostly visible ticket correctly |
+| 2 | Contextual Full Routing | Medium | `issue_type`, `priority`, `assignment_group`, `resolution_action` | route under partial observability with investigation and clarification |
+| 3 | Adaptive Queue Routing | Hard | `issue_type`, `priority`, `assignment_group`, `resolution_action` | route while managing queue pressure, incidents, deferrals, and downstream follow-ups |
 
 ## Locked Vocabulary
 
@@ -151,10 +152,13 @@ Visible ticket fields:
 - `description`
 - optional `ambiguity_note`
 - optional `planning_note`
+- optional `customer_update_note`
 - optional `related_ticket_id`
 - optional `related_ticket_preview`
 - optional `routing_options`
 - optional `capacity_state`
+- optional `operational_context`
+- optional `generated_from_ticket_id`
 
 Each observation also includes:
 
@@ -196,16 +200,23 @@ The internal `HelpdeskTicketState` tracks:
 - `team_capacity_remaining`
 - `high_priority_slots_remaining`
 - `escalation_slots_remaining`
+- `incident_slots_remaining`
 - `planning_penalty_total`
+- `incident_gap_total`
+- `sla_breach_count`
+- `dynamic_queue_events`
 
 ## Grading And Reward
 
 Scoring is deterministic and normalized to `[0.0, 1.0]`.
 
-The action model now supports two paths:
+The action model now supports five paths:
 
 - `action_type="submit"` for the final routing answer
 - `action_type="investigate"` with a small built-in tool surface before submission
+- `action_type="request_info"` to ask for customer / operator clarification on the current ticket
+- `action_type="open_incident"` to reserve incident handling capacity before routing risky tickets
+- `action_type="defer"` to push a ticket later in the queue and accept the downstream queue consequences
 
 Available tools:
 
@@ -223,6 +234,8 @@ Hard-task investigation behavior:
 - blind or repeated probing does not pay by default
 - premature hard-task submission can incur a shaping penalty even when the visible text looks plausible
 - resource-greedy routing can add planning penalties later in the queue even when a single ticket looks correct in isolation
+- incident-sensitive tickets can require an explicit `open_incident` step to avoid future follow-up debt
+- bad or incomplete hard-task handling can append a deterministic follow-up ticket later in the same episode
 - terminal `rubric_reward` remains the objective evaluation signal, while per-step `reward` is the denser training signal
 
 Per-field behavior:
@@ -237,9 +250,9 @@ Task weights:
 
 | Task | Issue Type | Priority | Assignment Group | Resolution Action |
 |------|------------|----------|------------------|-------------------|
-| 1 | 100% | - | - | - |
-| 2 | 60% | 40% | - | - |
-| 3 | 35% | 20% | 25% | 20% |
+| 1 | 40% | 20% | 20% | 20% |
+| 2 | 32% | 20% | 24% | 24% |
+| 3 | 30% | 20% | 25% | 25% |
 
 Final episode rubric reward is queue-based:
 
@@ -251,7 +264,7 @@ Both `reward` and `rubric_reward` now use the closed interval `[0.0, 1.0]`.
 
 Step reward is lightly milestone-shaped: high per-ticket scores get a small bonus and very low scores get a small penalty before the final clamp.
 
-Final reward also includes a queue-economics penalty when the agent exceeds the free investigation budget. One investigation per queued ticket is free, but extra investigation steps reduce the final reward more noticeably than before. On hard-task queues, assignment-group capacity, high-priority slots, and escalation slots also create cross-ticket trade-offs.
+Final reward also includes a queue-economics penalty when the agent exceeds the free investigation budget. One investigation-style step per queued ticket is free, but extra investigation or clarification steps reduce the final reward more noticeably than before. On hard-task queues, assignment-group capacity, high-priority slots, escalation slots, incident slots, and deferred-ticket SLA pressure all create cross-ticket trade-offs.
 
 To make the environment more RL-friendly, each observation now also surfaces structured reward telemetry:
 
@@ -302,7 +315,7 @@ It includes:
 
 ## Difficulty Coverage
 
-The difficulty ladder is visible both in the task fields and in the dataset itself.
+The difficulty ladder is now visible in observability and control, not just in the submitted field count.
 
 Easy-style examples:
 
@@ -322,6 +335,7 @@ Hard-style examples:
 - `ticket-029`: seat expansion combined with a prorating question
 - `ticket-038`: follow-up billing thread with escalated urgency
 - `ticket-045`: repeated account suspension thread with legal-escalation pressure
+- generated `*-followup` tickets: deterministic reopened cases that only appear when the earlier handling was incomplete or operationally risky
 
 ## Repository Layout
 

@@ -16,6 +16,18 @@ from server.grader import (
 from vocabulary import ASSIGNMENT_GROUPS, ISSUE_TYPES, PRIORITIES, RESOLUTION_ACTIONS
 
 
+def _expected_breakdown(task_id: int, **field_scores: float) -> dict[str, float]:
+    return {field: field_scores[field] for field in TASK_WEIGHTS[task_id]}
+
+
+def _expected_task_score(task_id: int, **field_scores: float) -> float:
+    raw_score = sum(
+        field_scores[field] * TASK_WEIGHTS[task_id][field]
+        for field in TASK_WEIGHTS[task_id]
+    )
+    return max(0.0, min(1.0, raw_score))
+
+
 def _ticket(
     *,
     issue_type: str = "billing_license",
@@ -71,8 +83,24 @@ class GraderUnitTests(unittest.TestCase):
 
         score, breakdown = grade_action(action, ticket, task_id=1)
 
-        self.assertAlmostEqual(score, 0.4)
-        self.assertEqual(breakdown, {"issue_type": 0.4})
+        expected_breakdown = _expected_breakdown(
+            1,
+            issue_type=0.4,
+            priority=0.0,
+            assignment_group=0.0,
+            resolution_action=0.0,
+        )
+        self.assertEqual(breakdown, expected_breakdown)
+        self.assertAlmostEqual(
+            score,
+            _expected_task_score(
+                1,
+                issue_type=0.4,
+                priority=0.0,
+                assignment_group=0.0,
+                resolution_action=0.0,
+            ),
+        )
 
     def test_issue_type_scoring_matches_declared_similarity_table_exhaustively(self) -> None:
         for expected in ISSUE_TYPES:
@@ -88,9 +116,24 @@ class GraderUnitTests(unittest.TestCase):
                         if predicted == expected
                         else ISSUE_TYPE_SIMILARITY.get((predicted, expected), 0.0)
                     )
-                    expected_task_score = max(0.0, min(1.0, raw_expected_score))
-                    self.assertAlmostEqual(score, expected_task_score)
-                    self.assertEqual(breakdown, {"issue_type": raw_expected_score})
+                    expected_breakdown = _expected_breakdown(
+                        1,
+                        issue_type=raw_expected_score,
+                        priority=0.0,
+                        assignment_group=0.0,
+                        resolution_action=0.0,
+                    )
+                    self.assertAlmostEqual(
+                        score,
+                        _expected_task_score(
+                            1,
+                            issue_type=raw_expected_score,
+                            priority=0.0,
+                            assignment_group=0.0,
+                            resolution_action=0.0,
+                        ),
+                    )
+                    self.assertEqual(breakdown, expected_breakdown)
 
     def test_unrelated_issue_type_gets_zero_not_fuzzy_credit(self) -> None:
         ticket = _ticket(issue_type="onboarding")
@@ -99,7 +142,16 @@ class GraderUnitTests(unittest.TestCase):
         score, breakdown = grade_action(action, ticket, task_id=1)
 
         self.assertAlmostEqual(score, 0.0)
-        self.assertEqual(breakdown, {"issue_type": 0.0})
+        self.assertEqual(
+            breakdown,
+            _expected_breakdown(
+                1,
+                issue_type=0.0,
+                priority=0.0,
+                assignment_group=0.0,
+                resolution_action=0.0,
+            ),
+        )
 
     def test_priority_scoring_uses_defined_proximity_table(self) -> None:
         ticket = _ticket(priority="critical")
@@ -109,7 +161,16 @@ class GraderUnitTests(unittest.TestCase):
 
         self.assertAlmostEqual(breakdown["issue_type"], 1.0)
         self.assertAlmostEqual(breakdown["priority"], 0.6)
-        self.assertAlmostEqual(score, 0.84)
+        self.assertAlmostEqual(
+            score,
+            _expected_task_score(
+                2,
+                issue_type=1.0,
+                priority=0.6,
+                assignment_group=0.0,
+                resolution_action=0.0,
+            ),
+        )
 
     def test_priority_scoring_matches_declared_table_exhaustively(self) -> None:
         for expected in PRIORITIES:
@@ -130,11 +191,24 @@ class GraderUnitTests(unittest.TestCase):
                     )
                     self.assertEqual(
                         breakdown,
-                        {"issue_type": 1.0, "priority": priority_score},
+                        _expected_breakdown(
+                            2,
+                            issue_type=1.0,
+                            priority=priority_score,
+                            assignment_group=0.0,
+                            resolution_action=0.0,
+                        ),
                     )
-                    raw_score = 0.6 + 0.4 * priority_score
-                    expected_task_score = max(0.0, min(1.0, raw_score))
-                    self.assertAlmostEqual(score, expected_task_score)
+                    self.assertAlmostEqual(
+                        score,
+                        _expected_task_score(
+                            2,
+                            issue_type=1.0,
+                            priority=priority_score,
+                            assignment_group=0.0,
+                            resolution_action=0.0,
+                        ),
+                    )
 
     def test_task_2_weights_apply_as_documented(self) -> None:
         ticket = _ticket(priority="high")
@@ -142,8 +216,26 @@ class GraderUnitTests(unittest.TestCase):
 
         score, breakdown = grade_action(action, ticket, task_id=2)
 
-        self.assertEqual(breakdown, {"issue_type": 1.0, "priority": 0.5})
-        self.assertAlmostEqual(score, 0.8)
+        self.assertEqual(
+            breakdown,
+            _expected_breakdown(
+                2,
+                issue_type=1.0,
+                priority=0.5,
+                assignment_group=0.0,
+                resolution_action=0.0,
+            ),
+        )
+        self.assertAlmostEqual(
+            score,
+            _expected_task_score(
+                2,
+                issue_type=1.0,
+                priority=0.5,
+                assignment_group=0.0,
+                resolution_action=0.0,
+            ),
+        )
 
     def test_assignment_group_partial_credit_uses_declared_similarity_table(self) -> None:
         ticket = _ticket()
@@ -157,7 +249,16 @@ class GraderUnitTests(unittest.TestCase):
         score, breakdown = grade_action(action, ticket, task_id=3)
 
         self.assertEqual(breakdown["assignment_group"], 0.55)
-        self.assertAlmostEqual(score, 0.8875)
+        self.assertAlmostEqual(
+            score,
+            _expected_task_score(
+                3,
+                issue_type=1.0,
+                priority=1.0,
+                assignment_group=0.55,
+                resolution_action=1.0,
+            ),
+        )
 
     def test_assignment_group_unrelated_miss_stays_zero(self) -> None:
         ticket = _ticket()
@@ -171,7 +272,16 @@ class GraderUnitTests(unittest.TestCase):
         score, breakdown = grade_action(action, ticket, task_id=3)
 
         self.assertEqual(breakdown["assignment_group"], 0.0)
-        self.assertAlmostEqual(score, 0.75)
+        self.assertAlmostEqual(
+            score,
+            _expected_task_score(
+                3,
+                issue_type=1.0,
+                priority=1.0,
+                assignment_group=0.0,
+                resolution_action=1.0,
+            ),
+        )
 
     def test_task_3_weights_apply_as_documented(self) -> None:
         ticket = _ticket(priority="high")
@@ -186,14 +296,24 @@ class GraderUnitTests(unittest.TestCase):
 
         self.assertEqual(
             breakdown,
-            {
-                "issue_type": 1.0,
-                "priority": 0.5,
-                "assignment_group": 0.0,
-                "resolution_action": 1.0,
-            },
+            _expected_breakdown(
+                3,
+                issue_type=1.0,
+                priority=0.5,
+                assignment_group=0.0,
+                resolution_action=1.0,
+            ),
         )
-        self.assertAlmostEqual(score, 0.65)
+        self.assertAlmostEqual(
+            score,
+            _expected_task_score(
+                3,
+                issue_type=1.0,
+                priority=0.5,
+                assignment_group=0.0,
+                resolution_action=1.0,
+            ),
+        )
 
     def test_alternate_route_can_win_when_primary_route_is_worse(self) -> None:
         ticket = HelpdeskTicketRecord(
@@ -243,7 +363,16 @@ class GraderUnitTests(unittest.TestCase):
         score, breakdown = grade_action(action, ticket, task_id=3)
 
         self.assertEqual(breakdown["resolution_action"], 0.35)
-        self.assertAlmostEqual(score, 0.87)
+        self.assertAlmostEqual(
+            score,
+            _expected_task_score(
+                3,
+                issue_type=1.0,
+                priority=1.0,
+                assignment_group=1.0,
+                resolution_action=0.35,
+            ),
+        )
 
     def test_resolution_action_unrelated_miss_stays_zero(self) -> None:
         ticket = _ticket()
@@ -257,7 +386,16 @@ class GraderUnitTests(unittest.TestCase):
         score, breakdown = grade_action(action, ticket, task_id=3)
 
         self.assertEqual(breakdown["resolution_action"], 0.0)
-        self.assertAlmostEqual(score, 0.8)
+        self.assertAlmostEqual(
+            score,
+            _expected_task_score(
+                3,
+                issue_type=1.0,
+                priority=1.0,
+                assignment_group=1.0,
+                resolution_action=0.0,
+            ),
+        )
 
     def test_assignment_group_scoring_matches_declared_similarity_table_exhaustively(self) -> None:
         for expected in ASSIGNMENT_GROUPS:
@@ -280,16 +418,24 @@ class GraderUnitTests(unittest.TestCase):
                     )
                     self.assertEqual(
                         breakdown,
-                        {
-                            "issue_type": 1.0,
-                            "priority": 1.0,
-                            "assignment_group": assignment_group_score,
-                            "resolution_action": 1.0,
-                        },
+                        _expected_breakdown(
+                            3,
+                            issue_type=1.0,
+                            priority=1.0,
+                            assignment_group=assignment_group_score,
+                            resolution_action=1.0,
+                        ),
                     )
-                    raw_score = 0.35 + 0.20 + 0.25 * assignment_group_score + 0.20
-                    expected_task_score = max(0.0, min(1.0, raw_score))
-                    self.assertAlmostEqual(score, expected_task_score)
+                    self.assertAlmostEqual(
+                        score,
+                        _expected_task_score(
+                            3,
+                            issue_type=1.0,
+                            priority=1.0,
+                            assignment_group=assignment_group_score,
+                            resolution_action=1.0,
+                        ),
+                    )
 
     def test_resolution_action_scoring_matches_declared_similarity_table_exhaustively(self) -> None:
         for expected in RESOLUTION_ACTIONS:
@@ -312,16 +458,24 @@ class GraderUnitTests(unittest.TestCase):
                     )
                     self.assertEqual(
                         breakdown,
-                        {
-                            "issue_type": 1.0,
-                            "priority": 1.0,
-                            "assignment_group": 1.0,
-                            "resolution_action": resolution_action_score,
-                        },
+                        _expected_breakdown(
+                            3,
+                            issue_type=1.0,
+                            priority=1.0,
+                            assignment_group=1.0,
+                            resolution_action=resolution_action_score,
+                        ),
                     )
-                    raw_score = 0.35 + 0.20 + 0.25 + 0.20 * resolution_action_score
-                    expected_task_score = max(0.0, min(1.0, raw_score))
-                    self.assertAlmostEqual(score, expected_task_score)
+                    self.assertAlmostEqual(
+                        score,
+                        _expected_task_score(
+                            3,
+                            issue_type=1.0,
+                            priority=1.0,
+                            assignment_group=1.0,
+                            resolution_action=resolution_action_score,
+                        ),
+                    )
 
     def test_partial_credit_tables_never_override_exact_match(self) -> None:
         for pair, value in ISSUE_TYPE_SIMILARITY.items():

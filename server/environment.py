@@ -26,17 +26,37 @@ from vocabulary import (
 
 
 QUEUE_SIZE_RANGE = (3, 5)
-AVAILABLE_ACTION_TYPES = ("submit", "investigate")
-AVAILABLE_TOOLS = (
+BASE_AVAILABLE_TOOLS = (
     "lookup_related_ticket",
     "lookup_requester_history",
     "lookup_internal_routing_note",
     "lookup_queue_capacity_forecast",
 )
+TASK_AVAILABLE_ACTION_TYPES: dict[int, tuple[str, ...]] = {
+    1: ("submit", "investigate"),
+    2: ("submit", "investigate", "request_info"),
+    3: ("submit", "investigate", "request_info", "defer", "open_incident"),
+}
+TASK_AVAILABLE_TOOLS: dict[int, tuple[str, ...]] = {
+    1: (
+        "lookup_related_ticket",
+        "lookup_requester_history",
+        "lookup_internal_routing_note",
+    ),
+    2: (
+        "lookup_related_ticket",
+        "lookup_requester_history",
+        "lookup_internal_routing_note",
+    ),
+    3: BASE_AVAILABLE_TOOLS,
+}
 FREE_INVESTIGATIONS_PER_TICKET = 1
 EXTRA_INVESTIGATION_COST = 0.04
 MAX_EXTRA_INVESTIGATION_PENALTY = 0.25
 USEFUL_INVESTIGATION_REWARD = 0.03
+USEFUL_REQUEST_INFO_REWARD = 0.025
+INCIDENT_OPEN_REWARD = 0.03
+REQUEST_INFO_CONTEXT_COMPLETION_BONUS = 0.02
 PREMATURE_SUBMIT_PENALTY = 0.22
 NONDEFAULT_HIDDEN_CONTEXT_PENALTY = 0.08
 CONTEXT_COMPLETION_BONUS = 0.06
@@ -49,6 +69,11 @@ TEAM_CAPACITY_OVERFLOW_PENALTY = 0.08
 HIGH_PRIORITY_SLOT_OVERFLOW_PENALTY = 0.06
 ESCALATION_SLOT_OVERFLOW_PENALTY = 0.05
 PLANNING_SUCCESS_BONUS = 0.05
+INCIDENT_SLOT_OVERFLOW_PENALTY = 0.05
+INCIDENT_GAP_PENALTY = 0.07
+SLA_BREACH_PENALTY = 0.04
+FOLLOW_UP_SPAWN_THRESHOLD = 0.72
+MAX_DEFERS_PER_TICKET = 1
 
 TASK3_INVESTIGATION_TOOL_PLAN: dict[str, tuple[str, ...]] = {
     "ticket-021": ("lookup_related_ticket", "lookup_requester_history"),
@@ -170,6 +195,7 @@ class HelpdeskTicketRoutingEnvironment(
             team_capacity_initial,
             high_priority_slots_initial,
             escalation_slots_initial,
+            incident_slots_initial,
         ) = self._initial_capacity_state_for_queue(task_id)
 
         self._state = HelpdeskTicketState(
@@ -193,8 +219,20 @@ class HelpdeskTicketRoutingEnvironment(
             high_priority_slots_remaining=high_priority_slots_initial,
             escalation_slots_initial=escalation_slots_initial,
             escalation_slots_remaining=escalation_slots_initial,
+            incident_slots_initial=incident_slots_initial,
+            incident_slots_remaining=incident_slots_initial,
             planning_penalty_total=0.0,
             capacity_pressure_tickets_resolved=0,
+            ticket_request_info_usage={},
+            ticket_defer_counts={},
+            open_incident_ticket_ids=[],
+            incident_actions_used=0,
+            incident_gap_total=0.0,
+            deferred_ticket_count=0,
+            sla_breach_count=0,
+            spawned_follow_up_ticket_ids=[],
+            spawned_follow_up_source_ids=[],
+            dynamic_queue_events=[],
         )
 
         return self._build_observation(task)
@@ -215,9 +253,19 @@ class HelpdeskTicketRoutingEnvironment(
         current_ticket = self._queue[idx]
         task_id = self._state.current_task_id
         task = get_task_definition(task_id)
+        if action.action_type not in self._available_action_types_for_task(task_id):
+            raise ValueError(
+                f"Unsupported action_type {action.action_type!r} for task {task_id}"
+            )
 
         if action.action_type == "investigate":
             return self._handle_investigation_action(task, current_ticket, action, idx)
+        if action.action_type == "request_info":
+            return self._handle_request_info_action(task, current_ticket, action, idx)
+        if action.action_type == "defer":
+            return self._handle_defer_action(task, current_ticket, action, idx)
+        if action.action_type == "open_incident":
+            return self._handle_open_incident_action(task, current_ticket, action, idx)
 
         submitted_fields = {
             f
@@ -317,6 +365,7 @@ class HelpdeskTicketRoutingEnvironment(
             action,
             task_id=task_id,
         )
+        incident_gap_penalty = self._incident_gap_penalty(current_ticket, action)
         capacity_penalty, capacity_details = self._apply_capacity_usage(
             current_ticket,
             action,
@@ -353,7 +402,7 @@ class HelpdeskTicketRoutingEnvironment(
                 trajectory_reward - self._state.planning_penalty_total
             )
             final_reward = clamp_open_unit_interval(
-                rubric_reward - context_penalty - capacity_penalty
+                rubric_reward - context_penalty - capacity_penalty - incident_gap_penalty
             )
             self._state.total_reward = rubric_reward
             investigation_penalty = self._compute_episode_penalty()
@@ -363,7 +412,31 @@ class HelpdeskTicketRoutingEnvironment(
             self._state.step_count += 1
             self._state.current_ticket_index += 1
             final_reward = clamp_open_unit_interval(
-                step_reward - context_penalty - capacity_penalty
+                step_reward - context_penalty - capacity_penalty - incident_gap_penalty
+            )
+
+        spawned_follow_up_ticket_id = None
+        if self._should_spawn_follow_up(
+            current_ticket,
+            score=score,
+            context_penalty=context_penalty,
+            incident_gap_penalty=incident_gap_penalty,
+        ):
+            spawned_follow_up = self._spawn_follow_up_ticket(current_ticket)
+            spawned_follow_up_ticket_id = spawned_follow_up.ticket_id
+            if is_done:
+                is_done = False
+                trajectory_reward = None
+                trajectory_components = None
+                rubric_reward = None
+                final_reward = clamp_open_unit_interval(
+                    step_reward - context_penalty - capacity_penalty - incident_gap_penalty
+                )
+                self._state.total_reward = 0.0
+        if incident_gap_penalty > 0.0:
+            self._state.incident_gap_total = round(
+                self._state.incident_gap_total + incident_gap_penalty,
+                4,
             )
 
         reward_components = self._build_reward_components(
@@ -379,6 +452,7 @@ class HelpdeskTicketRoutingEnvironment(
                 "context_gap_penalty": context_penalty,
                 "context_completion_bonus": process_bonus,
                 "risk_penalty": risk_penalty,
+                "incident_gap_penalty": incident_gap_penalty,
                 "capacity_penalty": capacity_penalty,
                 "delta_adjustment": step_adjustments["delta_adjustment"],
                 "required_investigation_count": len(self._required_tools_for_ticket(current_ticket)),
@@ -391,6 +465,7 @@ class HelpdeskTicketRoutingEnvironment(
                 "planning_success_bonus": self._planning_success_bonus()
                 if is_done
                 else 0.0,
+                "spawned_follow_up_ticket_id": spawned_follow_up_ticket_id,
                 "rubric_reward": rubric_reward,
                 "trajectory_average_reward": (
                     trajectory_components["average_reward"]
@@ -457,12 +532,27 @@ class HelpdeskTicketRoutingEnvironment(
 
     def _apply_episode_economics(self, base_reward: float) -> float:
         penalty = self._compute_episode_penalty()
+        penalty += min(
+            0.25,
+            self._state.sla_breach_count * SLA_BREACH_PENALTY + self._state.incident_gap_total,
+        )
         return clamp_open_unit_interval(base_reward - penalty)
 
     def _current_average_score(self) -> float:
         if not self._state.per_ticket_scores:
             return 0.0
         return sum(self._state.per_ticket_scores) / len(self._state.per_ticket_scores)
+
+    def _available_action_types_for_task(self, task_id: int | None = None) -> list[str]:
+        resolved_task_id = self._state.current_task_id if task_id is None else task_id
+        return list(TASK_AVAILABLE_ACTION_TYPES.get(int(resolved_task_id or 1), ("submit",)))
+
+    def _available_tools_for_task(self, task_id: int | None = None) -> list[str]:
+        resolved_task_id = self._state.current_task_id if task_id is None else task_id
+        return list(TASK_AVAILABLE_TOOLS.get(int(resolved_task_id or 1), ()))
+
+    def _sync_queue_ticket_ids(self) -> None:
+        self._state.queue_ticket_ids = [ticket.ticket_id for ticket in self._queue]
 
     def _ticket_has_alternate_route(self, ticket: HelpdeskTicketRecord) -> bool:
         return any(
@@ -552,9 +642,9 @@ class HelpdeskTicketRoutingEnvironment(
     def _initial_capacity_state_for_queue(
         self,
         task_id: int,
-    ) -> tuple[dict[str, int], int, int]:
+    ) -> tuple[dict[str, int], int, int, int]:
         if task_id != 3:
-            return {}, 0, 0
+            return {}, 0, 0, 0
 
         primary_group_demand: dict[str, int] = {}
         alternate_relief_by_group: dict[str, int] = {}
@@ -563,6 +653,7 @@ class HelpdeskTicketRoutingEnvironment(
         high_priority_relief = 0
         escalation_demand = 0
         escalation_relief = 0
+        incident_demand = 0
 
         for ticket in self._queue:
             primary_route = self._route_for_ticket(ticket)
@@ -574,6 +665,8 @@ class HelpdeskTicketRoutingEnvironment(
                 high_priority_demand += 1
             if primary_route["resolution_action"] in {"assign", "escalate"}:
                 escalation_demand += 1
+            if self._requires_incident(ticket):
+                incident_demand += 1
 
             if self._ticket_has_alternate_route(ticket):
                 alternate_route = self._route_for_ticket(ticket, use_alternate=True)
@@ -622,10 +715,16 @@ class HelpdeskTicketRoutingEnvironment(
         else:
             escalation_slots_initial = escalation_demand
 
+        if incident_demand <= 1:
+            incident_slots_initial = incident_demand
+        else:
+            incident_slots_initial = max(1, incident_demand - 1)
+
         return (
             team_capacity_initial,
             high_priority_slots_initial,
             escalation_slots_initial,
+            incident_slots_initial,
         )
 
     def _future_queue_demand(self) -> dict[str, Any]:
@@ -634,6 +733,7 @@ class HelpdeskTicketRoutingEnvironment(
         high_priority_needed = 0
         escalation_needed = 0
         capacity_sensitive_tickets = 0
+        incident_needed = 0
 
         for ticket in future_tickets:
             route = self._route_for_ticket(ticket)
@@ -646,6 +746,8 @@ class HelpdeskTicketRoutingEnvironment(
                 escalation_needed += 1
             if self._ticket_has_alternate_route(ticket):
                 capacity_sensitive_tickets += 1
+            if self._requires_incident(ticket):
+                incident_needed += 1
 
         return {
             "remaining_ticket_count": len(future_tickets),
@@ -653,6 +755,7 @@ class HelpdeskTicketRoutingEnvironment(
             "high_priority_needed": high_priority_needed,
             "escalation_needed": escalation_needed,
             "capacity_sensitive_tickets": capacity_sensitive_tickets,
+            "incident_needed": incident_needed,
         }
 
     def _capacity_state_snapshot(self) -> dict[str, Any]:
@@ -663,6 +766,8 @@ class HelpdeskTicketRoutingEnvironment(
             "high_priority_slots_initial": self._state.high_priority_slots_initial,
             "escalation_slots_remaining": self._state.escalation_slots_remaining,
             "escalation_slots_initial": self._state.escalation_slots_initial,
+            "incident_slots_remaining": self._state.incident_slots_remaining,
+            "incident_slots_initial": self._state.incident_slots_initial,
         }
 
     def _planning_route_recommendation(self, ticket: HelpdeskTicketRecord) -> dict[str, Any]:
@@ -897,8 +1002,191 @@ class HelpdeskTicketRoutingEnvironment(
             )
         )
 
+    def _ticket_text(self, ticket: HelpdeskTicketRecord) -> str:
+        return f"{ticket.title} {ticket.description}".lower()
+
+    def _requires_incident(self, ticket: HelpdeskTicketRecord) -> bool:
+        if ticket.incident_recommended:
+            return True
+        text = self._ticket_text(ticket)
+        return (
+            ticket.priority in {"high", "critical"}
+            and ticket.issue_type
+            in {"application_support", "identity_access", "security_compliance"}
+            and any(
+                phrase in text
+                for phrase in (
+                    "outage",
+                    "cannot log in",
+                    "login",
+                    "regression",
+                    "unstable",
+                    "blocked",
+                    "lockout",
+                    "company-wide",
+                    "production",
+                    "unresolved",
+                )
+            )
+        )
+
+    def _incident_open_for_ticket(self, ticket: HelpdeskTicketRecord) -> bool:
+        related_ids = {ticket.ticket_id}
+        if ticket.related_ticket_id:
+            related_ids.add(ticket.related_ticket_id)
+        if ticket.generated_from_ticket_id:
+            related_ids.add(ticket.generated_from_ticket_id)
+        return any(ticket_id in self._state.open_incident_ticket_ids for ticket_id in related_ids)
+
+    def _request_info_note_for_ticket(self, ticket: HelpdeskTicketRecord) -> str | None:
+        note_parts: list[str] = []
+        if ticket.customer_update_note:
+            note_parts.append(ticket.customer_update_note)
+        if ticket.related_ticket_id is not None:
+            note_parts.append(
+                "The requester confirmed this is connected to the earlier case and wants a single accountable owner."
+            )
+        if self._ticket_has_nondefault_routing(ticket):
+            note_parts.append(
+                "The requester clarified that the blocker owner matters more than the superficial request label."
+            )
+        if self._ticket_has_alternate_route(ticket):
+            note_parts.append(
+                "Operations said an acknowledged fallback path is acceptable if the preferred queue is saturated."
+            )
+        if self._requires_incident(ticket):
+            note_parts.append(
+                "Stakeholders asked for incident-style coordination because the issue is still operationally active."
+            )
+        if not note_parts:
+            return None
+        return " ".join(note_parts)
+
+    def _request_info_used(self, ticket_id: str) -> bool:
+        return self._state.ticket_request_info_usage.get(ticket_id, 0) > 0
+
+    def _defer_count(self, ticket_id: str) -> int:
+        return self._state.ticket_defer_counts.get(ticket_id, 0)
+
+    def _record_dynamic_queue_event(self, event_type: str, **details: Any) -> None:
+        self._state.dynamic_queue_events.append({"event_type": event_type, **details})
+
+    def _escalate_priority_level(self, priority: str) -> str:
+        if priority == "low":
+            return "medium"
+        if priority == "medium":
+            return "high"
+        return "critical"
+
+    def _escalate_ticket_after_delay(
+        self,
+        ticket: HelpdeskTicketRecord,
+        *,
+        defer_count: int,
+    ) -> HelpdeskTicketRecord:
+        escalated_priority = self._escalate_priority_level(ticket.priority)
+        description_suffix = (
+            " The ticket was deferred earlier in the queue and now needs firmer ownership."
+        )
+        customer_update = (
+            ticket.customer_update_note
+            or "The requester followed up after the delay and wants a committed owner."
+        )
+        return ticket.model_copy(
+            update={
+                "priority": escalated_priority,
+                "title": (
+                    ticket.title
+                    if ticket.title.lower().startswith("re:")
+                    else f"Re: {ticket.title}"
+                ),
+                "description": f"{ticket.description}{description_suffix}",
+                "customer_update_note": customer_update,
+            }
+        )
+
+    def _should_spawn_follow_up(
+        self,
+        ticket: HelpdeskTicketRecord,
+        *,
+        score: float,
+        context_penalty: float,
+        incident_gap_penalty: float,
+    ) -> bool:
+        if self._state.current_task_id != 3:
+            return False
+        if ticket.generated_from_ticket_id is not None:
+            return False
+        if ticket.ticket_id in self._state.spawned_follow_up_source_ids:
+            return False
+        if not (
+            self._requires_incident(ticket)
+            or self._ticket_mentions_follow_up(ticket)
+            or ticket.related_ticket_id is not None
+            or ticket.priority in {"high", "critical"}
+        ):
+            return False
+        return (
+            score < FOLLOW_UP_SPAWN_THRESHOLD
+            or (context_penalty >= 0.15 and score < 0.9)
+            or incident_gap_penalty > 0.0
+        )
+
+    def _spawn_follow_up_ticket(self, ticket: HelpdeskTicketRecord) -> HelpdeskTicketRecord:
+        follow_up_ticket = HelpdeskTicketRecord(
+            ticket_id=f"{ticket.ticket_id}-followup",
+            title=(
+                ticket.title
+                if ticket.title.lower().startswith("re:")
+                else f"Re: {ticket.title}"
+            ),
+            requester=ticket.requester,
+            description=(
+                "The earlier handling did not fully resolve the issue. The requester is "
+                f"following up on {ticket.ticket_id} and needs a single accountable owner now."
+            ),
+            issue_type=ticket.issue_type,
+            priority=(
+                "critical"
+                if ticket.priority in {"high", "critical"}
+                else self._escalate_priority_level(ticket.priority)
+            ),
+            assignment_group=ticket.assignment_group,
+            resolution_action=(
+                "escalate"
+                if ticket.priority in {"high", "critical"} or self._requires_incident(ticket)
+                else ticket.resolution_action
+            ),
+            ambiguity_note=(
+                ticket.ambiguity_note
+                or "Prior routing did not settle ownership; route to the team that can actually unblock the issue."
+            ),
+            related_ticket_id=ticket.ticket_id,
+            planning_note=ticket.planning_note,
+            customer_update_note=(
+                "The requester said the last response did not resolve the blocker and wants an accountable next owner."
+            ),
+            incident_recommended=self._requires_incident(ticket),
+            generated_from_ticket_id=ticket.ticket_id,
+        )
+        self._queue.append(follow_up_ticket)
+        self._tickets_by_id[follow_up_ticket.ticket_id] = follow_up_ticket
+        self._sync_queue_ticket_ids()
+        self._state.spawned_follow_up_ticket_ids.append(follow_up_ticket.ticket_id)
+        self._state.spawned_follow_up_source_ids.append(ticket.ticket_id)
+        self._record_dynamic_queue_event(
+            "spawn_follow_up",
+            source_ticket_id=ticket.ticket_id,
+            follow_up_ticket_id=follow_up_ticket.ticket_id,
+        )
+        return follow_up_ticket
+
     def _ticket_repeated_requester_count(self, ticket: HelpdeskTicketRecord) -> int:
-        return sum(1 for candidate in self._dataset if candidate.requester == ticket.requester)
+        return sum(
+            1
+            for candidate in self._tickets_by_id.values()
+            if candidate.requester == ticket.requester
+        )
 
     def _tool_has_available_context(
         self,
@@ -927,7 +1215,7 @@ class HelpdeskTicketRoutingEnvironment(
         task_id: int | None = None,
     ) -> list[str]:
         resolved_task_id = self._state.current_task_id if task_id is None else task_id
-        if resolved_task_id != 3:
+        if resolved_task_id is None or resolved_task_id < 2:
             return []
         required_tools: list[str] = list(TASK3_INVESTIGATION_TOOL_PLAN.get(ticket.ticket_id, ()))
         if ticket.related_ticket_id is not None and "lookup_related_ticket" not in required_tools:
@@ -949,17 +1237,50 @@ class HelpdeskTicketRoutingEnvironment(
         ):
             required_tools.append("lookup_requester_history")
         if (
-            self._ticket_is_capacity_sensitive(ticket)
+            resolved_task_id == 3
+            and self._ticket_is_capacity_sensitive(ticket)
             and "lookup_queue_capacity_forecast" not in required_tools
         ):
             required_tools.append("lookup_queue_capacity_forecast")
         filtered_required_tools: list[str] = []
+        allowed_tool_set = set(self._available_tools_for_task(resolved_task_id))
         for tool_name in required_tools:
             if tool_name in filtered_required_tools:
+                continue
+            if tool_name not in allowed_tool_set:
                 continue
             if self._tool_has_available_context(ticket, tool_name):
                 filtered_required_tools.append(tool_name)
         return filtered_required_tools
+
+    def _recommended_operational_actions(self, ticket: HelpdeskTicketRecord) -> list[str]:
+        recommended_actions: list[str] = []
+        available_action_types = set(self._available_action_types_for_task())
+        if (
+            "request_info" in available_action_types
+            and self._request_info_note_for_ticket(ticket) is not None
+            and not self._request_info_used(ticket.ticket_id)
+        ):
+            recommended_actions.append("request_info")
+        if (
+            "open_incident" in available_action_types
+            and self._requires_incident(ticket)
+            and not self._incident_open_for_ticket(ticket)
+        ):
+            recommended_actions.append("open_incident")
+        if (
+            "defer" in available_action_types
+            and self._defer_count(ticket.ticket_id) < MAX_DEFERS_PER_TICKET
+            and self._state.current_ticket_index < len(self._queue) - 1
+            and ticket.priority not in {"high", "critical"}
+            and (
+                bool(self._remaining_tools_for_ticket(ticket))
+                or self._ticket_is_capacity_sensitive(ticket)
+                or self._request_info_note_for_ticket(ticket) is not None
+            )
+        ):
+            recommended_actions.append("defer")
+        return recommended_actions
 
     def _used_tools_for_ticket(self, ticket_id: str) -> list[str]:
         return list(self._state.ticket_tool_usage.get(ticket_id, []))
@@ -983,6 +1304,8 @@ class HelpdeskTicketRoutingEnvironment(
         revealed_tools = self._used_tools_for_ticket(ticket.ticket_id)
         remaining_tools = self._remaining_tools_for_ticket(ticket)
         total_required = max(1, len(required_tools))
+        request_info_used = self._request_info_used(ticket.ticket_id)
+        operational_actions = self._recommended_operational_actions(ticket)
         return {
             "required_tools": required_tools,
             "revealed_tools": revealed_tools,
@@ -990,6 +1313,8 @@ class HelpdeskTicketRoutingEnvironment(
             "revealed_count": len(revealed_tools),
             "remaining_count": len(remaining_tools),
             "completeness": round(len(revealed_tools) / total_required, 2),
+            "request_info_used": request_info_used,
+            "recommended_operational_actions": operational_actions,
         }
 
     def _default_redacted_description(self, ticket: HelpdeskTicketRecord) -> str:
@@ -1028,7 +1353,7 @@ class HelpdeskTicketRoutingEnvironment(
         return "Helpdesk routing decision"
 
     def _visible_title(self, ticket: HelpdeskTicketRecord) -> str:
-        if self._state.current_task_id == 3 and self._remaining_tools_for_ticket(ticket):
+        if self._state.current_task_id in {2, 3} and self._remaining_tools_for_ticket(ticket):
             return HARD_TASK_TITLE_REDACTIONS.get(
                 ticket.ticket_id,
                 self._default_redacted_title(ticket),
@@ -1036,7 +1361,7 @@ class HelpdeskTicketRoutingEnvironment(
         return ticket.title
 
     def _visible_description(self, ticket: HelpdeskTicketRecord) -> str:
-        if self._state.current_task_id == 3 and self._remaining_tools_for_ticket(ticket):
+        if self._state.current_task_id in {2, 3} and self._remaining_tools_for_ticket(ticket):
             return HARD_TASK_DESCRIPTION_REDACTIONS.get(
                 ticket.ticket_id,
                 self._default_redacted_description(ticket),
@@ -1122,6 +1447,21 @@ class HelpdeskTicketRoutingEnvironment(
 
         return round(priority_penalty + resolution_penalty, 4)
 
+    def _incident_gap_penalty(
+        self,
+        ticket: HelpdeskTicketRecord,
+        action: HelpdeskTicketAction,
+    ) -> float:
+        if self._state.current_task_id != 3:
+            return 0.0
+        if not self._requires_incident(ticket):
+            return 0.0
+        if self._incident_open_for_ticket(ticket):
+            return 0.0
+        if action.resolution_action in {"escalate", "assign"}:
+            return round(INCIDENT_GAP_PENALTY / 2, 4)
+        return INCIDENT_GAP_PENALTY
+
     def _build_reward_components(
         self,
         *,
@@ -1198,7 +1538,7 @@ class HelpdeskTicketRoutingEnvironment(
                 "assignment_group": ticket.assignment_group,
                 "resolution_action": ticket.resolution_action,
             }
-            for ticket in self._dataset
+            for ticket in self._tickets_by_id.values()
             if ticket.requester == current_ticket.requester
             and ticket.ticket_id != current_ticket.ticket_id
         ]
@@ -1235,6 +1575,7 @@ class HelpdeskTicketRoutingEnvironment(
             "capacity_state": recommendation["capacity_state"],
             "future_queue_demand": recommendation["future_demand"],
             "routing_options": routing_options,
+            "incident_recommended": self._requires_incident(current_ticket),
         }
 
     def _run_investigation_tool(
@@ -1262,6 +1603,8 @@ class HelpdeskTicketRoutingEnvironment(
     ) -> HelpdeskTicketObservation:
         if action.tool_name is None:
             raise ValueError("Investigate actions require tool_name")
+        if action.tool_name not in self._available_tools_for_task():
+            raise ValueError(f"Unsupported tool_name for current task: {action.tool_name}")
         submitted_fields = {
             field
             for field in ("issue_type", "priority", "assignment_group", "resolution_action")
@@ -1332,10 +1675,279 @@ class HelpdeskTicketRoutingEnvironment(
         self._state.last_reward_components = reward_components
         return self._build_observation(task, done=False, reward=investigation_reward)
 
+    def _handle_request_info_action(
+        self,
+        task: dict,
+        current_ticket: HelpdeskTicketRecord,
+        action: HelpdeskTicketAction,
+        idx: int,
+    ) -> HelpdeskTicketObservation:
+        submitted_fields = {
+            field
+            for field in ("issue_type", "priority", "assignment_group", "resolution_action")
+            if getattr(action, field) is not None
+        }
+        if submitted_fields:
+            raise ValueError(
+                "request_info actions cannot include submit fields: "
+                f"{sorted(submitted_fields)}"
+            )
+
+        ticket_id = current_ticket.ticket_id
+        note = self._request_info_note_for_ticket(current_ticket)
+        already_used = self._request_info_used(ticket_id)
+        useful_request = note is not None and not already_used
+        self._state.ticket_request_info_usage[ticket_id] = (
+            self._state.ticket_request_info_usage.get(ticket_id, 0) + 1
+        )
+        self._state.step_count += 1
+        self._state.investigation_steps += 1
+        self._state.investigation_budget_remaining = max(
+            0,
+            self._state.investigation_budget_remaining - 1,
+        )
+        request_reward = USEFUL_REQUEST_INFO_REWARD if useful_request else 0.0
+        tool_result = {
+            "action_type": "request_info",
+            "found": useful_request,
+            "ticket_id": ticket_id,
+            "customer_update_note": note if useful_request else "",
+        }
+        self._state.last_tool_result = tool_result
+        self._state.last_step_reward = request_reward
+        self._state.reward = request_reward
+        self._state.done = False
+        self._state.investigation_penalty_applied = self._compute_episode_penalty()
+        progress = self._tool_progress_for_ticket(current_ticket)
+        reward_components = self._build_reward_components(
+            ticket_score=0.0,
+            field_breakdown={},
+            shaped_step_reward=request_reward,
+            reward_kind="operational",
+            final_reward=request_reward,
+            investigation_penalty=self._state.investigation_penalty_applied,
+            extra_details={
+                "operational_action": "request_info",
+                "new_context_revealed": useful_request,
+                "customer_update_visible": useful_request,
+                "hidden_context_remaining_count": progress["remaining_count"],
+                "context_completeness": progress["completeness"],
+            },
+        )
+        self._state.history_entries.append(
+            self._build_history_entry(
+                current_ticket,
+                predicted=action.model_dump(exclude_none=True),
+                score=0.0,
+                breakdown={},
+                queue_position=idx + 1,
+                reward=request_reward,
+                reward_kind="operational",
+                tool_result=tool_result,
+                reward_components=reward_components,
+            )
+        )
+        self._state.last_reward_components = reward_components
+        return self._build_observation(task, done=False, reward=request_reward)
+
+    def _handle_defer_action(
+        self,
+        task: dict,
+        current_ticket: HelpdeskTicketRecord,
+        action: HelpdeskTicketAction,
+        idx: int,
+    ) -> HelpdeskTicketObservation:
+        submitted_fields = {
+            field
+            for field in ("issue_type", "priority", "assignment_group", "resolution_action")
+            if getattr(action, field) is not None
+        }
+        if submitted_fields:
+            raise ValueError(
+                "defer actions cannot include submit fields: "
+                f"{sorted(submitted_fields)}"
+            )
+
+        ticket_id = current_ticket.ticket_id
+        existing_count = self._defer_count(ticket_id)
+        defer_allowed = (
+            existing_count < MAX_DEFERS_PER_TICKET
+            and idx < len(self._queue) - 1
+            and self._state.current_task_id in {2, 3}
+        )
+        defer_count = existing_count + 1
+        reward = 0.0
+        sla_risk = current_ticket.priority in {"high", "critical"} or self._ticket_mentions_follow_up(
+            current_ticket
+        )
+        moved_ticket = current_ticket
+
+        if defer_allowed:
+            self._state.ticket_defer_counts[ticket_id] = defer_count
+            self._state.deferred_ticket_count += 1
+            if sla_risk:
+                self._state.sla_breach_count += 1
+                moved_ticket = self._escalate_ticket_after_delay(
+                    current_ticket,
+                    defer_count=defer_count,
+                )
+            elif (
+                self._remaining_tools_for_ticket(current_ticket)
+                or self._request_info_note_for_ticket(current_ticket) is not None
+                or self._ticket_is_capacity_sensitive(current_ticket)
+            ):
+                reward = REQUEST_INFO_CONTEXT_COMPLETION_BONUS
+            self._queue.pop(idx)
+            self._queue.append(moved_ticket)
+            self._tickets_by_id[moved_ticket.ticket_id] = moved_ticket
+            self._sync_queue_ticket_ids()
+            self._record_dynamic_queue_event(
+                "defer",
+                ticket_id=ticket_id,
+                defer_count=defer_count,
+                sla_risk=sla_risk,
+            )
+        else:
+            self._state.sla_breach_count += 1
+            self._record_dynamic_queue_event(
+                "defer_denied",
+                ticket_id=ticket_id,
+                defer_count=defer_count,
+            )
+
+        self._state.step_count += 1
+        self._state.last_tool_result = {
+            "action_type": "defer",
+            "ticket_id": ticket_id,
+            "defer_allowed": defer_allowed,
+            "defer_count": defer_count,
+            "sla_risk": sla_risk,
+        }
+        self._state.last_step_reward = reward
+        self._state.reward = reward
+        self._state.done = False
+        reward_components = self._build_reward_components(
+            ticket_score=0.0,
+            field_breakdown={},
+            shaped_step_reward=reward,
+            reward_kind="operational",
+            final_reward=reward,
+            extra_details={
+                "operational_action": "defer",
+                "defer_allowed": defer_allowed,
+                "defer_count": defer_count,
+                "sla_breach_count": self._state.sla_breach_count,
+            },
+        )
+        self._state.history_entries.append(
+            self._build_history_entry(
+                current_ticket,
+                predicted=action.model_dump(exclude_none=True),
+                score=0.0,
+                breakdown={},
+                queue_position=idx + 1,
+                reward=reward,
+                reward_kind="operational",
+                tool_result=self._state.last_tool_result,
+                reward_components=reward_components,
+            )
+        )
+        self._state.last_reward_components = reward_components
+        return self._build_observation(task, done=False, reward=reward)
+
+    def _handle_open_incident_action(
+        self,
+        task: dict,
+        current_ticket: HelpdeskTicketRecord,
+        action: HelpdeskTicketAction,
+        idx: int,
+    ) -> HelpdeskTicketObservation:
+        submitted_fields = {
+            field
+            for field in ("issue_type", "priority", "assignment_group", "resolution_action")
+            if getattr(action, field) is not None
+        }
+        if submitted_fields:
+            raise ValueError(
+                "open_incident actions cannot include submit fields: "
+                f"{sorted(submitted_fields)}"
+            )
+
+        useful_incident = (
+            self._state.current_task_id == 3
+            and self._requires_incident(current_ticket)
+            and not self._incident_open_for_ticket(current_ticket)
+        )
+        overflow = 0
+        incident_reward = 0.0
+        if useful_incident:
+            self._state.open_incident_ticket_ids.append(current_ticket.ticket_id)
+            self._state.incident_actions_used += 1
+            overflow = max(0, 1 - self._state.incident_slots_remaining)
+            self._state.incident_slots_remaining = max(
+                0,
+                self._state.incident_slots_remaining - 1,
+            )
+            overflow_penalty = round(overflow * INCIDENT_SLOT_OVERFLOW_PENALTY, 4)
+            if overflow_penalty > 0.0:
+                self._state.planning_penalty_total = round(
+                    self._state.planning_penalty_total + overflow_penalty,
+                    4,
+                )
+                self._state.planning_penalty_applied = overflow_penalty
+            incident_reward = clamp_open_unit_interval(
+                INCIDENT_OPEN_REWARD - overflow_penalty
+            )
+            self._record_dynamic_queue_event(
+                "open_incident",
+                ticket_id=current_ticket.ticket_id,
+                overflow=overflow,
+            )
+
+        self._state.step_count += 1
+        self._state.last_tool_result = {
+            "action_type": "open_incident",
+            "ticket_id": current_ticket.ticket_id,
+            "incident_open": useful_incident,
+            "incident_slots_remaining": self._state.incident_slots_remaining,
+            "overflow": overflow,
+        }
+        self._state.last_step_reward = incident_reward
+        self._state.reward = incident_reward
+        self._state.done = False
+        reward_components = self._build_reward_components(
+            ticket_score=0.0,
+            field_breakdown={},
+            shaped_step_reward=incident_reward,
+            reward_kind="operational",
+            final_reward=incident_reward,
+            extra_details={
+                "operational_action": "open_incident",
+                "incident_open": useful_incident,
+                "incident_slots_remaining": self._state.incident_slots_remaining,
+            },
+        )
+        self._state.history_entries.append(
+            self._build_history_entry(
+                current_ticket,
+                predicted=action.model_dump(exclude_none=True),
+                score=0.0,
+                breakdown={},
+                queue_position=idx + 1,
+                reward=incident_reward,
+                reward_kind="operational",
+                tool_result=self._state.last_tool_result,
+                reward_components=reward_components,
+            )
+        )
+        self._state.last_reward_components = reward_components
+        return self._build_observation(task, done=False, reward=incident_reward)
+
     def _build_ticket_view(self, ticket: HelpdeskTicketRecord) -> dict[str, Any]:
         progress = self._tool_progress_for_ticket(ticket)
         remaining_tools = progress["remaining_tools"]
         used_tools = set(self._used_tools_for_ticket(ticket.ticket_id))
+        operational_actions = progress["recommended_operational_actions"]
         ticket_view: dict[str, Any] = {
             "ticket_id": ticket.ticket_id,
             "title": self._visible_title(ticket),
@@ -1354,6 +1966,14 @@ class HelpdeskTicketRoutingEnvironment(
                 "investigations_used_for_ticket": progress["revealed_count"],
                 "recommended_tools": list(remaining_tools),
             }
+        ticket_view["operational_context"] = {
+            "request_info_available": self._request_info_note_for_ticket(ticket) is not None,
+            "request_info_used": progress["request_info_used"],
+            "defer_count": self._defer_count(ticket.ticket_id),
+            "incident_recommended": self._requires_incident(ticket),
+            "incident_open": self._incident_open_for_ticket(ticket),
+            "recommended_actions": operational_actions,
+        }
         if ticket.ambiguity_note is not None and "lookup_internal_routing_note" not in remaining_tools:
             ticket_view["ambiguity_note"] = ticket.ambiguity_note
         if (
@@ -1361,6 +1981,8 @@ class HelpdeskTicketRoutingEnvironment(
             and "lookup_internal_routing_note" not in remaining_tools
         ):
             ticket_view["planning_note"] = ticket.planning_note
+        if self._request_info_used(ticket.ticket_id):
+            ticket_view["customer_update_note"] = self._request_info_note_for_ticket(ticket)
         if ticket.related_ticket_id is not None and "lookup_related_ticket" not in remaining_tools:
             ticket_view["related_ticket_id"] = ticket.related_ticket_id
             related_ticket = self._tickets_by_id.get(ticket.related_ticket_id)
@@ -1376,6 +1998,8 @@ class HelpdeskTicketRoutingEnvironment(
             or "lookup_queue_capacity_forecast" in used_tools
         ):
             ticket_view["routing_options"] = self._routing_options_for_ticket(ticket)
+        if ticket.generated_from_ticket_id is not None:
+            ticket_view["generated_from_ticket_id"] = ticket.generated_from_ticket_id
         return ticket_view
 
     def _build_feedback_summary(
@@ -1398,6 +2022,13 @@ class HelpdeskTicketRoutingEnvironment(
             parts.append(f"Investigation step used {tool_name or 'a tool'}")
             if reward_components and reward_components.get("new_context_revealed"):
                 parts.append("new context was revealed")
+        elif reward_kind == "operational":
+            operational_action = (
+                reward_components.get("operational_action")
+                if reward_components
+                else predicted.get("action_type")
+            )
+            parts.append(f"Operational step used {operational_action or 'an action'}")
         elif penalty_reason is not None:
             parts.append(f"Penalty applied: {penalty_reason}")
         else:
@@ -1435,6 +2066,12 @@ class HelpdeskTicketRoutingEnvironment(
             planning_penalty_total = reward_components.get("planning_penalty_total")
             if planning_penalty_total:
                 parts.append(f"planning_penalty_total={planning_penalty_total:.2f}")
+            incident_gap_penalty = reward_components.get("incident_gap_penalty")
+            if incident_gap_penalty:
+                parts.append(f"incident_gap_penalty={incident_gap_penalty:.2f}")
+            spawned_follow_up_ticket_id = reward_components.get("spawned_follow_up_ticket_id")
+            if spawned_follow_up_ticket_id:
+                parts.append(f"spawned_follow_up={spawned_follow_up_ticket_id}")
 
         return "; ".join(parts)
 
@@ -1463,6 +2100,12 @@ class HelpdeskTicketRoutingEnvironment(
             "score": score,
             "breakdown": breakdown,
             "queue_position": queue_position,
+            "operational_context": {
+                "request_info_used": progress["request_info_used"],
+                "defer_count": self._defer_count(ticket.ticket_id),
+                "incident_open": self._incident_open_for_ticket(ticket),
+                "recommended_actions": progress["recommended_operational_actions"],
+            },
         }
         if self._state.current_task_id == 3:
             history_entry["capacity_state"] = self._capacity_state_snapshot()
@@ -1479,6 +2122,8 @@ class HelpdeskTicketRoutingEnvironment(
             and "lookup_internal_routing_note" not in remaining_tools
         ):
             history_entry["planning_note"] = ticket.planning_note
+        if self._request_info_used(ticket.ticket_id):
+            history_entry["customer_update_note"] = self._request_info_note_for_ticket(ticket)
         if ticket.related_ticket_id is not None and "lookup_related_ticket" not in remaining_tools:
             history_entry["related_ticket_id"] = ticket.related_ticket_id
             related_ticket = self._tickets_by_id.get(ticket.related_ticket_id)
@@ -1503,6 +2148,8 @@ class HelpdeskTicketRoutingEnvironment(
             history_entry["tool_result"] = tool_result
         if reward_components is not None:
             history_entry["reward_components"] = reward_components
+        if ticket.generated_from_ticket_id is not None:
+            history_entry["generated_from_ticket_id"] = ticket.generated_from_ticket_id
         if progress["required_tools"]:
             history_entry["context_progress"] = {
                 "hidden_context_remaining": bool(progress["remaining_count"]),
@@ -1562,12 +2209,15 @@ class HelpdeskTicketRoutingEnvironment(
                 and (ticket_view.get("context_status") or {}).get("hidden_context_remaining")
             ),
             "action_mode": "investigate_or_submit",
-            "available_action_types": list(AVAILABLE_ACTION_TYPES),
+            "available_action_types": self._available_action_types_for_task(),
             "average_score_so_far": self._state.average_score_so_far,
             "progress_fraction": progress_fraction,
             "investigation_penalty_applied": self._state.investigation_penalty_applied,
             "planning_penalty_total": self._state.planning_penalty_total,
             "planning_penalty_applied": self._state.planning_penalty_applied,
+            "sla_breach_count": self._state.sla_breach_count,
+            "incident_gap_total": self._state.incident_gap_total,
+            "dynamic_queue_events": list(self._state.dynamic_queue_events[-5:]),
         }
         if self._state.current_task_id == 3:
             metadata["capacity_state"] = self._capacity_state_snapshot()
@@ -1591,8 +2241,8 @@ class HelpdeskTicketRoutingEnvironment(
             task_name=task["name"],
             instructions=task["instructions"],
             allowed_fields=list(task["allowed_fields"]),
-            available_action_types=list(AVAILABLE_ACTION_TYPES),
-            available_tools=list(AVAILABLE_TOOLS),
+            available_action_types=self._available_action_types_for_task(),
+            available_tools=self._available_tools_for_task(),
             investigation_budget_remaining=self._state.investigation_budget_remaining,
             last_tool_result=self._state.last_tool_result,
             current_ticket=ticket_view,
