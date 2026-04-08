@@ -1012,21 +1012,42 @@ def should_investigate(
             "escalating",
         )
     )
+    operational_context = ticket.get("operational_context") or {}
+    cluster_signal = (
+        int(operational_context.get("future_cluster_ticket_count", 0) or 0) > 0
+        or int(operational_context.get("shared_requester_count", 0) or 0) > 1
+        or any(
+            phrase in routing_text
+            for phrase in (
+                "single coordinated owner",
+                "existing workstream",
+                "request cluster",
+                "parallel workstream",
+            )
+        )
+    )
 
     preferred_tools: list[str] = []
     if last_tool_name == "lookup_related_ticket":
         preferred_tools.append("lookup_requester_history")
     if last_tool_name == "lookup_requester_history":
         preferred_tools.append("lookup_internal_routing_note")
+    if last_tool_name == "lookup_internal_routing_note":
+        preferred_tools.append("lookup_queue_cluster_summary")
+    if last_tool_name == "lookup_queue_cluster_summary":
+        preferred_tools.append("lookup_queue_capacity_forecast")
     if follow_up_signal or ticket.get("related_ticket_id"):
         preferred_tools.append("lookup_related_ticket")
     if routing_ambiguity_signal or hidden_context_remaining:
         preferred_tools.append("lookup_internal_routing_note")
     if requester_history_signal:
         preferred_tools.append("lookup_requester_history")
+    if cluster_signal:
+        preferred_tools.append("lookup_queue_cluster_summary")
     if hidden_context_remaining:
         preferred_tools.extend(
             [
+                "lookup_queue_cluster_summary",
                 "lookup_queue_capacity_forecast",
                 "lookup_related_ticket",
                 "lookup_internal_routing_note",

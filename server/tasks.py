@@ -66,6 +66,7 @@ TASKS = {
 
 PLANNING_ROUTE_UPDATES: dict[str, dict] = {
     "ticket-022": {
+        "service_cluster_id": "commerce_outage_recovery",
         "planning_note": (
             "If the application queue is saturated, billing operations can own the "
             "customer-facing charge review as a lower-fidelity fallback while the bug "
@@ -119,7 +120,11 @@ PLANNING_ROUTE_UPDATES: dict[str, dict] = {
         "alternate_resolution_action": "escalate",
         "alternate_route_score_multiplier": 0.76,
     },
+    "ticket-046": {
+        "service_cluster_id": "atlasbank_lockout_bridge",
+    },
     "ticket-047": {
+        "service_cluster_id": "bluequarry_launch_readiness",
         "planning_note": (
             "The preferred route is an immediate service-desk extension, but the "
             "commercial owner can take it if operational fulfillment capacity is exhausted."
@@ -138,6 +143,7 @@ PLANNING_ROUTE_UPDATES: dict[str, dict] = {
         "alternate_route_score_multiplier": 0.9,
     },
     "ticket-050": {
+        "service_cluster_id": "merger_onboarding_wave",
         "planning_note": (
             "Central coordination is preferred. If service-desk capacity is depleted, "
             "onboarding operations can still run a reduced fulfillment path."
@@ -154,6 +160,9 @@ PLANNING_ROUTE_UPDATES: dict[str, dict] = {
         ),
         "alternate_issue_type": "service_request",
         "alternate_route_score_multiplier": 0.83,
+    },
+    "ticket-052": {
+        "service_cluster_id": "clientgrid_evidence_renewal",
     },
     "ticket-053": {
         "planning_note": (
@@ -176,6 +185,9 @@ PLANNING_ROUTE_UPDATES: dict[str, dict] = {
         "alternate_assignment_group": "service_desk",
         "alternate_resolution_action": "acknowledge",
         "alternate_route_score_multiplier": 0.9,
+    },
+    "ticket-038": {
+        "service_cluster_id": "commerce_outage_recovery",
     },
 }
 
@@ -222,6 +234,7 @@ CURATED_EXPANSION_RECORDS: list[dict] = [
             "Executives want a single incident bridge owner before the board packet is sent."
         ),
         "incident_recommended": True,
+        "service_cluster_id": "atlasbank_lockout_bridge",
         "alternate_assignment_group": "service_desk",
         "alternate_resolution_action": "assign",
         "alternate_route_score_multiplier": 0.72,
@@ -242,6 +255,7 @@ CURATED_EXPANSION_RECORDS: list[dict] = [
             "Service desk is preferred for cross-team coordination. If coordination "
             "capacity is exhausted, onboarding operations can fulfill the extension directly."
         ),
+        "service_cluster_id": "merger_onboarding_wave",
         "alternate_assignment_group": "onboarding_ops",
         "alternate_resolution_action": "fulfill",
         "alternate_route_score_multiplier": 0.85,
@@ -262,6 +276,7 @@ CURATED_EXPANSION_RECORDS: list[dict] = [
             "Invoice operations can fulfill directly. If that queue is constrained, "
             "service desk can acknowledge and schedule the retrieval."
         ),
+        "service_cluster_id": "commerce_outage_recovery",
         "alternate_assignment_group": "service_desk",
         "alternate_resolution_action": "acknowledge",
         "alternate_route_score_multiplier": 0.88,
@@ -287,6 +302,7 @@ CURATED_EXPANSION_RECORDS: list[dict] = [
             "The customer says the launch rehearsal will fail without a same-day answer."
         ),
         "incident_recommended": True,
+        "service_cluster_id": "bluequarry_launch_readiness",
         "alternate_assignment_group": "procurement",
         "alternate_resolution_action": "assign",
         "alternate_route_score_multiplier": 0.8,
@@ -334,6 +350,7 @@ CURATED_EXPANSION_RECORDS: list[dict] = [
             "Application engineering is preferred because they hold the remediation artifacts. "
             "Security can still acknowledge the questionnaire and buy time when app capacity is tight."
         ),
+        "service_cluster_id": "clientgrid_evidence_renewal",
         "alternate_assignment_group": "security_team",
         "alternate_resolution_action": "acknowledge",
         "alternate_route_score_multiplier": 0.82,
@@ -395,6 +412,7 @@ CURATED_EXPANSION_RECORDS: list[dict] = [
             "Central coordination is preferred. If service-desk capacity is exhausted, "
             "onboarding operations can still run a reduced fulfillment path."
         ),
+        "service_cluster_id": "merger_onboarding_wave",
         "alternate_priority": "medium",
         "alternate_assignment_group": "onboarding_ops",
         "alternate_resolution_action": "fulfill",
@@ -440,11 +458,113 @@ CURATED_EXPANSION_RECORDS: list[dict] = [
         "customer_update_note": (
             "Commercial leadership needs one named owner for the blocked renewal before end of day."
         ),
+        "service_cluster_id": "clientgrid_evidence_renewal",
         "alternate_issue_type": "service_request",
         "alternate_priority": "medium",
         "alternate_assignment_group": "procurement",
         "alternate_resolution_action": "assign",
         "alternate_route_score_multiplier": 0.76,
+    },
+    {
+        "ticket_id": "ticket-068",
+        "title": "Re: Second executive follow-up on the privileged-account lockout bridge",
+        "requester": "security-ops@atlasbank.io",
+        "description": (
+            "Another leadership update landed after ticket-057. Executives want to know "
+            "whether one incident owner is already coordinating the privileged-account lockout."
+        ),
+        "issue_type": "identity_access",
+        "priority": "high",
+        "assignment_group": "security_team",
+        "resolution_action": "escalate",
+        "related_ticket_id": "ticket-057",
+        "planning_note": (
+            "Security is still the preferred owner, but if an incident bridge is already "
+            "running, service desk can acknowledge and consolidate the status update."
+        ),
+        "customer_update_note": (
+            "Leadership said they do not want a second parallel workstream for the same lockout."
+        ),
+        "incident_recommended": True,
+        "service_cluster_id": "atlasbank_lockout_bridge",
+        "alternate_assignment_group": "service_desk",
+        "alternate_resolution_action": "acknowledge",
+        "alternate_route_score_multiplier": 0.78,
+    },
+    {
+        "ticket_id": "ticket-069",
+        "title": "Commercial sign-off still pending for the bluequarry launch rehearsal",
+        "requester": "solutions@bluequarry.io",
+        "description": (
+            "The sandbox extension is still the blocker, but finance now only needs one "
+            "owner to confirm whether commercial approval or operational execution comes next."
+        ),
+        "issue_type": "service_request",
+        "priority": "medium",
+        "assignment_group": "procurement",
+        "resolution_action": "assign",
+        "related_ticket_id": "ticket-060",
+        "planning_note": (
+            "Procurement owns the commercial answer, but if an earlier bridge is already "
+            "active the service desk can acknowledge and link this follow-up into that track."
+        ),
+        "customer_update_note": (
+            "The customer only wants a single coordinated answer instead of separate procurement and support replies."
+        ),
+        "service_cluster_id": "bluequarry_launch_readiness",
+        "alternate_assignment_group": "service_desk",
+        "alternate_resolution_action": "acknowledge",
+        "alternate_route_score_multiplier": 0.82,
+    },
+    {
+        "ticket_id": "ticket-070",
+        "title": "Renewal counsel asks for a named owner on the remediation evidence package",
+        "requester": "assurance@clientgrid.com",
+        "description": (
+            "Legal asked whether the remediation evidence request from ticket-067 is now "
+            "covered by an existing owner or needs a fresh commercial escalation."
+        ),
+        "issue_type": "security_compliance",
+        "priority": "high",
+        "assignment_group": "application_team",
+        "resolution_action": "escalate",
+        "related_ticket_id": "ticket-067",
+        "planning_note": (
+            "Application engineering still owns the evidence, but a coordinated service-desk "
+            "acknowledgement is acceptable if the earlier remediation thread already has an owner."
+        ),
+        "customer_update_note": (
+            "Counsel said duplicate answers from product and commercial teams would make the renewal risk look worse."
+        ),
+        "service_cluster_id": "clientgrid_evidence_renewal",
+        "alternate_assignment_group": "service_desk",
+        "alternate_resolution_action": "acknowledge",
+        "alternate_route_score_multiplier": 0.8,
+    },
+    {
+        "ticket_id": "ticket-071",
+        "title": "Access matrix still blocking the merger onboarding wave",
+        "requester": "integration@mergerco.com",
+        "description": (
+            "The onboarding launch from ticket-065 is still blocked because the access matrix "
+            "for the acquired support team is incomplete and Monday is getting close."
+        ),
+        "issue_type": "onboarding",
+        "priority": "high",
+        "assignment_group": "service_desk",
+        "resolution_action": "assign",
+        "related_ticket_id": "ticket-065",
+        "planning_note": (
+            "Central coordination remains preferred. If an earlier owner is already driving the "
+            "wave, onboarding operations can fulfill the matrix updates while service desk handles the communications."
+        ),
+        "customer_update_note": (
+            "The integration lead wants one owner for the remaining blocker instead of a fresh handoff."
+        ),
+        "service_cluster_id": "merger_onboarding_wave",
+        "alternate_assignment_group": "onboarding_ops",
+        "alternate_resolution_action": "fulfill",
+        "alternate_route_score_multiplier": 0.83,
     },
 ]
 

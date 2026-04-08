@@ -112,10 +112,12 @@ class TasksAndDatasetUnitTests(unittest.TestCase):
         alternate_route_count = sum(
             1 for record in dataset if record.alternate_route_score_multiplier > 0.0
         )
+        clustered_case_count = sum(1 for record in dataset if record.service_cluster_id)
 
         self.assertGreaterEqual(ambiguity_count, 4)
         self.assertGreaterEqual(follow_up_count, 3)
         self.assertGreaterEqual(alternate_route_count, 10)
+        self.assertGreaterEqual(clustered_case_count, 10)
 
     def test_load_dataset_accepts_utf8_bom(self) -> None:
         sample = (

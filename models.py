@@ -26,6 +26,7 @@ ACTION_TYPE_SET = {
 TOOL_NAME_SET = {"lookup_related_ticket", "lookup_requester_history"}
 TOOL_NAME_SET.add("lookup_internal_routing_note")
 TOOL_NAME_SET.add("lookup_queue_capacity_forecast")
+TOOL_NAME_SET.add("lookup_queue_cluster_summary")
 
 
 def _validate_choice(value: str, allowed: set[str], field_name: str) -> str:
@@ -63,6 +64,7 @@ class HelpdeskTicketRecord(BaseModel):
     customer_update_note: Optional[str] = None
     incident_recommended: bool = False
     generated_from_ticket_id: Optional[str] = None
+    service_cluster_id: Optional[str] = None
 
     @field_validator("issue_type")
     @classmethod

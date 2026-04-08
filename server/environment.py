@@ -31,6 +31,7 @@ BASE_AVAILABLE_TOOLS = (
     "lookup_requester_history",
     "lookup_internal_routing_note",
     "lookup_queue_capacity_forecast",
+    "lookup_queue_cluster_summary",
 )
 TASK_AVAILABLE_ACTION_TYPES: dict[int, tuple[str, ...]] = {
     1: ("submit", "investigate"),
@@ -74,6 +75,10 @@ INCIDENT_GAP_PENALTY = 0.07
 SLA_BREACH_PENALTY = 0.04
 FOLLOW_UP_SPAWN_THRESHOLD = 0.72
 MAX_DEFERS_PER_TICKET = 1
+CLUSTER_STABILIZE_SCORE_THRESHOLD = 0.84
+CLUSTER_DESTABILIZE_SCORE_THRESHOLD = 0.72
+CLUSTER_INCIDENT_RELIEF_MULTIPLIER = 0.94
+CLUSTER_OWNER_RELIEF_MULTIPLIER = 0.86
 
 TASK3_INVESTIGATION_TOOL_PLAN: dict[str, tuple[str, ...]] = {
     "ticket-021": ("lookup_related_ticket", "lookup_requester_history"),
@@ -190,7 +195,7 @@ class HelpdeskTicketRoutingEnvironment(
             queue_size = self._rng.randint(*QUEUE_SIZE_RANGE)
         else:
             queue_size = min(queue_size_value, len(self._dataset))
-        self._queue = self._rng.sample(self._dataset, min(queue_size, len(self._dataset)))
+        self._queue = self._sample_queue(task_id, min(queue_size, len(self._dataset)))
         (
             team_capacity_initial,
             high_priority_slots_initial,
@@ -438,6 +443,20 @@ class HelpdeskTicketRoutingEnvironment(
                 self._state.incident_gap_total + incident_gap_penalty,
                 4,
             )
+        cluster_stabilized_ticket_ids = self._stabilize_future_cluster_tickets(
+            current_ticket,
+            score=score,
+            context_penalty=context_penalty,
+            incident_gap_penalty=incident_gap_penalty,
+        )
+        cluster_destabilized_ticket_ids: list[str] = []
+        if not cluster_stabilized_ticket_ids:
+            cluster_destabilized_ticket_ids = self._destabilize_future_cluster_tickets(
+                current_ticket,
+                score=score,
+                context_penalty=context_penalty,
+                incident_gap_penalty=incident_gap_penalty,
+            )
 
         reward_components = self._build_reward_components(
             ticket_score=score,
@@ -466,6 +485,8 @@ class HelpdeskTicketRoutingEnvironment(
                 if is_done
                 else 0.0,
                 "spawned_follow_up_ticket_id": spawned_follow_up_ticket_id,
+                "cluster_stabilized_ticket_ids": cluster_stabilized_ticket_ids,
+                "cluster_destabilized_ticket_ids": cluster_destabilized_ticket_ids,
                 "rubric_reward": rubric_reward,
                 "trajectory_average_reward": (
                     trajectory_components["average_reward"]
@@ -553,6 +574,288 @@ class HelpdeskTicketRoutingEnvironment(
 
     def _sync_queue_ticket_ids(self) -> None:
         self._state.queue_ticket_ids = [ticket.ticket_id for ticket in self._queue]
+
+    def _cluster_sample_groups(self) -> list[list[HelpdeskTicketRecord]]:
+        groups: dict[str, list[HelpdeskTicketRecord]] = {}
+        for ticket in self._dataset:
+            if not ticket.service_cluster_id:
+                continue
+            groups.setdefault(ticket.service_cluster_id, []).append(ticket)
+        return [tickets for tickets in groups.values() if len(tickets) >= 2]
+
+    def _cluster_ticket_order_key(self, ticket: HelpdeskTicketRecord) -> tuple[int, int, str]:
+        priority_rank = {"critical": 0, "high": 1, "medium": 2, "low": 3}
+        follow_up_depth = 1 if ticket.related_ticket_id or ticket.generated_from_ticket_id else 0
+        return (
+            follow_up_depth,
+            priority_rank.get(ticket.priority, 4),
+            ticket.ticket_id,
+        )
+
+    def _sample_queue(self, task_id: int, queue_size: int) -> list[HelpdeskTicketRecord]:
+        if queue_size <= 0:
+            return []
+        if task_id != 3 or queue_size < 3:
+            return self._rng.sample(self._dataset, queue_size)
+
+        cluster_groups = self._cluster_sample_groups()
+        if not cluster_groups:
+            return self._rng.sample(self._dataset, queue_size)
+
+        chosen_group = self._rng.choice(cluster_groups)
+        max_cluster_take = min(len(chosen_group), 3 if queue_size >= 4 else 2)
+        cluster_take = max(2, min(max_cluster_take, queue_size - 1))
+        cluster_subset = self._rng.sample(chosen_group, cluster_take)
+        cluster_subset_ids = {ticket.ticket_id for ticket in cluster_subset}
+
+        filler_count = max(0, queue_size - len(cluster_subset))
+        remaining_pool = [
+            ticket for ticket in self._dataset if ticket.ticket_id not in cluster_subset_ids
+        ]
+        filler_subset = (
+            self._rng.sample(remaining_pool, filler_count) if filler_count > 0 else []
+        )
+
+        ordered_cluster = sorted(cluster_subset, key=self._cluster_ticket_order_key)
+        remaining_cluster = ordered_cluster[1:]
+        ordered_queue: list[HelpdeskTicketRecord] = []
+        if ordered_cluster:
+            ordered_queue.append(ordered_cluster[0])
+        while filler_subset or remaining_cluster:
+            if filler_subset:
+                ordered_queue.append(filler_subset.pop(0))
+            if remaining_cluster:
+                ordered_queue.append(remaining_cluster.pop(0))
+        return ordered_queue[:queue_size]
+
+    def _cluster_keys_for_ticket(self, ticket: HelpdeskTicketRecord) -> set[str]:
+        keys: set[str] = set()
+        if ticket.service_cluster_id:
+            keys.add(f"cluster:{ticket.service_cluster_id}")
+        if ticket.related_ticket_id:
+            keys.add(f"ticket:{ticket.related_ticket_id}")
+        if ticket.generated_from_ticket_id:
+            keys.add(f"ticket:{ticket.generated_from_ticket_id}")
+        if any(
+            candidate.ticket_id != ticket.ticket_id
+            and (
+                candidate.related_ticket_id == ticket.ticket_id
+                or candidate.generated_from_ticket_id == ticket.ticket_id
+            )
+            for candidate in self._tickets_by_id.values()
+        ):
+            keys.add(f"ticket:{ticket.ticket_id}")
+        if self._ticket_repeated_requester_count(ticket) >= 2:
+            keys.add(f"requester:{ticket.requester}")
+        return keys
+
+    def _tickets_share_cluster(
+        self,
+        first: HelpdeskTicketRecord,
+        second: HelpdeskTicketRecord,
+    ) -> bool:
+        if first.ticket_id == second.ticket_id:
+            return False
+        return bool(self._cluster_keys_for_ticket(first) & self._cluster_keys_for_ticket(second))
+
+    def _future_cluster_ticket_indexes(
+        self,
+        ticket: HelpdeskTicketRecord,
+        *,
+        start_index: int,
+    ) -> list[int]:
+        indexes: list[int] = []
+        for index in range(start_index, len(self._queue)):
+            future_ticket = self._queue[index]
+            if self._tickets_share_cluster(ticket, future_ticket):
+                indexes.append(index)
+        return indexes
+
+    def _cluster_summary(
+        self,
+        ticket: HelpdeskTicketRecord,
+        *,
+        start_index: int | None = None,
+    ) -> dict[str, Any]:
+        effective_start = (
+            self._state.current_ticket_index + 1 if start_index is None else start_index
+        )
+        future_indexes = self._future_cluster_ticket_indexes(
+            ticket,
+            start_index=effective_start,
+        )
+        future_tickets = [self._queue[index] for index in future_indexes]
+        return {
+            "service_cluster_id": ticket.service_cluster_id,
+            "cluster_keys": sorted(self._cluster_keys_for_ticket(ticket)),
+            "future_cluster_ticket_count": len(future_tickets),
+            "future_cluster_ticket_ids": [candidate.ticket_id for candidate in future_tickets],
+            "future_high_priority_count": sum(
+                1 for candidate in future_tickets if candidate.priority in {"high", "critical"}
+            ),
+            "shared_requester_count": self._ticket_repeated_requester_count(ticket),
+            "active_incident_cover": self._incident_open_for_ticket(ticket),
+        }
+
+    def _append_note(self, existing_note: str | None, addition: str | None) -> str | None:
+        if not addition:
+            return existing_note
+        if not existing_note:
+            return addition
+        if addition in existing_note:
+            return existing_note
+        return f"{existing_note} {addition}"
+
+    def _replace_queue_ticket(
+        self,
+        index: int,
+        updated_ticket: HelpdeskTicketRecord,
+    ) -> None:
+        self._queue[index] = updated_ticket
+        self._tickets_by_id[updated_ticket.ticket_id] = updated_ticket
+
+    def _stabilize_future_cluster_tickets(
+        self,
+        current_ticket: HelpdeskTicketRecord,
+        *,
+        score: float,
+        context_penalty: float,
+        incident_gap_penalty: float,
+    ) -> list[str]:
+        if self._state.current_task_id != 3:
+            return []
+        if score < CLUSTER_STABILIZE_SCORE_THRESHOLD:
+            return []
+        if context_penalty > 0.0 or incident_gap_penalty > 0.0:
+            return []
+
+        future_indexes = self._future_cluster_ticket_indexes(
+            current_ticket,
+            start_index=self._state.current_ticket_index,
+        )
+        if not future_indexes:
+            return []
+
+        incident_cover = self._incident_open_for_ticket(current_ticket)
+        relief_multiplier = (
+            CLUSTER_INCIDENT_RELIEF_MULTIPLIER
+            if incident_cover
+            else CLUSTER_OWNER_RELIEF_MULTIPLIER
+        )
+        planning_note = (
+            "An earlier incident bridge is already active for this request cluster, so later "
+            "updates can be acknowledged and coordinated instead of being re-triaged from scratch."
+            if incident_cover
+            else "An earlier ticket in this request cluster already has an accountable owner, "
+            "so later updates can be coordinated rather than fully re-triaged."
+        )
+        customer_note = (
+            "The requester said a single coordinated owner is acceptable as long as the update is linked to the existing workstream."
+        )
+        updated_ticket_ids: list[str] = []
+        for index in future_indexes:
+            future_ticket = self._queue[index]
+            updates: dict[str, Any] = {
+                "planning_note": self._append_note(future_ticket.planning_note, planning_note),
+                "customer_update_note": self._append_note(
+                    future_ticket.customer_update_note,
+                    customer_note,
+                ),
+            }
+            if (
+                not self._ticket_has_alternate_route(future_ticket)
+                or future_ticket.alternate_route_score_multiplier < relief_multiplier
+            ):
+                alternate_priority = (
+                    "high"
+                    if incident_cover and future_ticket.priority == "critical"
+                    else "medium"
+                    if incident_cover and future_ticket.priority == "high"
+                    else future_ticket.alternate_priority or future_ticket.priority
+                )
+                updates.update(
+                    {
+                        "alternate_issue_type": (
+                            future_ticket.alternate_issue_type or future_ticket.issue_type
+                        ),
+                        "alternate_priority": alternate_priority,
+                        "alternate_assignment_group": "service_desk",
+                        "alternate_resolution_action": (
+                            "acknowledge" if incident_cover else "assign"
+                        ),
+                        "alternate_route_score_multiplier": relief_multiplier,
+                    }
+                )
+            updated_ticket = future_ticket.model_copy(update=updates)
+            self._replace_queue_ticket(index, updated_ticket)
+            updated_ticket_ids.append(updated_ticket.ticket_id)
+
+        if updated_ticket_ids:
+            self._record_dynamic_queue_event(
+                "stabilize_cluster",
+                source_ticket_id=current_ticket.ticket_id,
+                affected_ticket_ids=updated_ticket_ids,
+                incident_cover=incident_cover,
+            )
+        return updated_ticket_ids
+
+    def _destabilize_future_cluster_tickets(
+        self,
+        current_ticket: HelpdeskTicketRecord,
+        *,
+        score: float,
+        context_penalty: float,
+        incident_gap_penalty: float,
+    ) -> list[str]:
+        if self._state.current_task_id != 3:
+            return []
+        if score >= CLUSTER_DESTABILIZE_SCORE_THRESHOLD:
+            if context_penalty <= 0.0 and incident_gap_penalty <= 0.0:
+                return []
+
+        future_indexes = self._future_cluster_ticket_indexes(
+            current_ticket,
+            start_index=self._state.current_ticket_index,
+        )
+        if not future_indexes:
+            return []
+
+        planning_note = (
+            "Earlier handling in this request cluster did not settle ownership, so this follow-on "
+            "arrives with more urgency and may need firmer coordination."
+        )
+        customer_note = (
+            "The requester is escalating because the earlier response did not fully resolve the blocker."
+        )
+        updated_ticket_ids: list[str] = []
+        for index in future_indexes:
+            future_ticket = self._queue[index]
+            updates: dict[str, Any] = {
+                "priority": self._escalate_priority_level(future_ticket.priority),
+                "planning_note": self._append_note(future_ticket.planning_note, planning_note),
+                "customer_update_note": self._append_note(
+                    future_ticket.customer_update_note,
+                    customer_note,
+                ),
+                "incident_recommended": (
+                    future_ticket.incident_recommended
+                    or current_ticket.priority in {"high", "critical"}
+                    or self._requires_incident(current_ticket)
+                ),
+            }
+            if future_ticket.related_ticket_id is None:
+                updates["related_ticket_id"] = current_ticket.ticket_id
+            updated_ticket = future_ticket.model_copy(update=updates)
+            self._replace_queue_ticket(index, updated_ticket)
+            updated_ticket_ids.append(updated_ticket.ticket_id)
+
+        if updated_ticket_ids:
+            self._record_dynamic_queue_event(
+                "destabilize_cluster",
+                source_ticket_id=current_ticket.ticket_id,
+                affected_ticket_ids=updated_ticket_ids,
+            )
+        return updated_ticket_ids
 
     def _ticket_has_alternate_route(self, ticket: HelpdeskTicketRecord) -> bool:
         return any(
@@ -734,6 +1037,7 @@ class HelpdeskTicketRoutingEnvironment(
         escalation_needed = 0
         capacity_sensitive_tickets = 0
         incident_needed = 0
+        clustered_follow_ons = 0
 
         for ticket in future_tickets:
             route = self._route_for_ticket(ticket)
@@ -748,6 +1052,8 @@ class HelpdeskTicketRoutingEnvironment(
                 capacity_sensitive_tickets += 1
             if self._requires_incident(ticket):
                 incident_needed += 1
+            if self._cluster_keys_for_ticket(ticket):
+                clustered_follow_ons += 1
 
         return {
             "remaining_ticket_count": len(future_tickets),
@@ -756,6 +1062,7 @@ class HelpdeskTicketRoutingEnvironment(
             "escalation_needed": escalation_needed,
             "capacity_sensitive_tickets": capacity_sensitive_tickets,
             "incident_needed": incident_needed,
+            "clustered_follow_ons": clustered_follow_ons,
         }
 
     def _capacity_state_snapshot(self) -> dict[str, Any]:
@@ -1036,7 +1343,18 @@ class HelpdeskTicketRoutingEnvironment(
             related_ids.add(ticket.related_ticket_id)
         if ticket.generated_from_ticket_id:
             related_ids.add(ticket.generated_from_ticket_id)
-        return any(ticket_id in self._state.open_incident_ticket_ids for ticket_id in related_ids)
+        if any(ticket_id in self._state.open_incident_ticket_ids for ticket_id in related_ids):
+            return True
+        ticket_cluster_keys = self._cluster_keys_for_ticket(ticket)
+        if not ticket_cluster_keys:
+            return False
+        for open_ticket_id in self._state.open_incident_ticket_ids:
+            open_ticket = self._tickets_by_id.get(open_ticket_id)
+            if open_ticket is None:
+                continue
+            if ticket_cluster_keys & self._cluster_keys_for_ticket(open_ticket):
+                return True
+        return False
 
     def _request_info_note_for_ticket(self, ticket: HelpdeskTicketRecord) -> str | None:
         note_parts: list[str] = []
@@ -1168,6 +1486,7 @@ class HelpdeskTicketRoutingEnvironment(
             ),
             incident_recommended=self._requires_incident(ticket),
             generated_from_ticket_id=ticket.ticket_id,
+            service_cluster_id=ticket.service_cluster_id or ticket.ticket_id,
         )
         self._queue.append(follow_up_ticket)
         self._tickets_by_id[follow_up_ticket.ticket_id] = follow_up_ticket
@@ -1207,6 +1526,14 @@ class HelpdeskTicketRoutingEnvironment(
                 self._ticket_has_alternate_route(ticket)
                 or self._future_queue_demand()["remaining_ticket_count"] > 0
             )
+        if tool_name == "lookup_queue_cluster_summary":
+            if self._state.current_task_id != 3:
+                return False
+            cluster_summary = self._cluster_summary(ticket)
+            return (
+                cluster_summary["future_cluster_ticket_count"] > 0
+                or cluster_summary["shared_requester_count"] > 1
+            )
         return False
 
     def _required_tools_for_ticket(
@@ -1242,6 +1569,21 @@ class HelpdeskTicketRoutingEnvironment(
             and "lookup_queue_capacity_forecast" not in required_tools
         ):
             required_tools.append("lookup_queue_capacity_forecast")
+        if resolved_task_id == 3:
+            cluster_summary = self._cluster_summary(
+                ticket,
+                start_index=self._state.current_ticket_index + 1,
+            )
+            if (
+                cluster_summary["future_cluster_ticket_count"] > 0
+                and "lookup_queue_cluster_summary" not in required_tools
+                and (
+                    self._requires_incident(ticket)
+                    or cluster_summary["future_high_priority_count"] > 0
+                    or cluster_summary["shared_requester_count"] > 1
+                )
+            ):
+                required_tools.append("lookup_queue_cluster_summary")
         filtered_required_tools: list[str] = []
         allowed_tool_set = set(self._available_tools_for_task(resolved_task_id))
         for tool_name in required_tools:
@@ -1256,6 +1598,7 @@ class HelpdeskTicketRoutingEnvironment(
     def _recommended_operational_actions(self, ticket: HelpdeskTicketRecord) -> list[str]:
         recommended_actions: list[str] = []
         available_action_types = set(self._available_action_types_for_task())
+        cluster_summary = self._cluster_summary(ticket)
         if (
             "request_info" in available_action_types
             and self._request_info_note_for_ticket(ticket) is not None
@@ -1277,6 +1620,7 @@ class HelpdeskTicketRoutingEnvironment(
                 bool(self._remaining_tools_for_ticket(ticket))
                 or self._ticket_is_capacity_sensitive(ticket)
                 or self._request_info_note_for_ticket(ticket) is not None
+                or cluster_summary["future_cluster_ticket_count"] > 0
             )
         ):
             recommended_actions.append("defer")
@@ -1318,6 +1662,12 @@ class HelpdeskTicketRoutingEnvironment(
         }
 
     def _default_redacted_description(self, ticket: HelpdeskTicketRecord) -> str:
+        cluster_summary = self._cluster_summary(ticket)
+        if cluster_summary["future_cluster_ticket_count"] > 0:
+            return (
+                "This ticket is part of a broader queue cluster and the best next step depends "
+                "on downstream consequences. Additional routing context is available via investigation."
+            )
         if ticket.related_ticket_id is not None:
             return (
                 "This is a follow-up operational issue. "
@@ -1342,6 +1692,8 @@ class HelpdeskTicketRoutingEnvironment(
         )
 
     def _default_redacted_title(self, ticket: HelpdeskTicketRecord) -> str:
+        if self._cluster_summary(ticket)["future_cluster_ticket_count"] > 0:
+            return "Clustered queue decision with hidden downstream impact"
         if ticket.related_ticket_id is not None:
             return "Follow-up request with hidden routing context"
         if self._internal_routing_note_for_ticket(ticket) is not None:
@@ -1578,6 +1930,19 @@ class HelpdeskTicketRoutingEnvironment(
             "incident_recommended": self._requires_incident(current_ticket),
         }
 
+    def _lookup_queue_cluster_summary(
+        self,
+        current_ticket: HelpdeskTicketRecord,
+    ) -> dict[str, Any]:
+        cluster_summary = self._cluster_summary(current_ticket)
+        return {
+            "tool_name": "lookup_queue_cluster_summary",
+            "found": cluster_summary["future_cluster_ticket_count"] > 0
+            or cluster_summary["shared_requester_count"] > 1,
+            "ticket_id": current_ticket.ticket_id,
+            **cluster_summary,
+        }
+
     def _run_investigation_tool(
         self,
         current_ticket: HelpdeskTicketRecord,
@@ -1592,6 +1957,8 @@ class HelpdeskTicketRoutingEnvironment(
             return self._lookup_internal_routing_note(current_ticket)
         if tool_name == "lookup_queue_capacity_forecast":
             return self._lookup_queue_capacity_forecast(current_ticket)
+        if tool_name == "lookup_queue_cluster_summary":
+            return self._lookup_queue_cluster_summary(current_ticket)
         raise ValueError(f"Unsupported tool_name: {tool_name}")
 
     def _handle_investigation_action(
@@ -1948,6 +2315,7 @@ class HelpdeskTicketRoutingEnvironment(
         remaining_tools = progress["remaining_tools"]
         used_tools = set(self._used_tools_for_ticket(ticket.ticket_id))
         operational_actions = progress["recommended_operational_actions"]
+        cluster_summary = self._cluster_summary(ticket)
         ticket_view: dict[str, Any] = {
             "ticket_id": ticket.ticket_id,
             "title": self._visible_title(ticket),
@@ -1973,6 +2341,11 @@ class HelpdeskTicketRoutingEnvironment(
             "incident_recommended": self._requires_incident(ticket),
             "incident_open": self._incident_open_for_ticket(ticket),
             "recommended_actions": operational_actions,
+            "service_cluster_id": ticket.service_cluster_id,
+            "future_cluster_ticket_count": cluster_summary["future_cluster_ticket_count"],
+            "future_cluster_ticket_ids": cluster_summary["future_cluster_ticket_ids"],
+            "shared_requester_count": cluster_summary["shared_requester_count"],
+            "active_incident_cover": cluster_summary["active_incident_cover"],
         }
         if ticket.ambiguity_note is not None and "lookup_internal_routing_note" not in remaining_tools:
             ticket_view["ambiguity_note"] = ticket.ambiguity_note
@@ -1998,6 +2371,8 @@ class HelpdeskTicketRoutingEnvironment(
             or "lookup_queue_capacity_forecast" in used_tools
         ):
             ticket_view["routing_options"] = self._routing_options_for_ticket(ticket)
+        if "lookup_queue_cluster_summary" in used_tools:
+            ticket_view["cluster_summary"] = cluster_summary
         if ticket.generated_from_ticket_id is not None:
             ticket_view["generated_from_ticket_id"] = ticket.generated_from_ticket_id
         return ticket_view
@@ -2072,6 +2447,18 @@ class HelpdeskTicketRoutingEnvironment(
             spawned_follow_up_ticket_id = reward_components.get("spawned_follow_up_ticket_id")
             if spawned_follow_up_ticket_id:
                 parts.append(f"spawned_follow_up={spawned_follow_up_ticket_id}")
+            cluster_stabilized_ticket_ids = reward_components.get("cluster_stabilized_ticket_ids")
+            if cluster_stabilized_ticket_ids:
+                parts.append(
+                    "cluster_stabilized=" + ",".join(cluster_stabilized_ticket_ids)
+                )
+            cluster_destabilized_ticket_ids = reward_components.get(
+                "cluster_destabilized_ticket_ids"
+            )
+            if cluster_destabilized_ticket_ids:
+                parts.append(
+                    "cluster_destabilized=" + ",".join(cluster_destabilized_ticket_ids)
+                )
 
         return "; ".join(parts)
 
@@ -2092,6 +2479,7 @@ class HelpdeskTicketRoutingEnvironment(
     ) -> dict[str, Any]:
         progress = self._tool_progress_for_ticket(ticket)
         remaining_tools = progress["remaining_tools"]
+        cluster_summary = self._cluster_summary(ticket)
         history_entry: dict[str, Any] = {
             "ticket_id": ticket.ticket_id,
             "title": ticket.title,
@@ -2105,6 +2493,9 @@ class HelpdeskTicketRoutingEnvironment(
                 "defer_count": self._defer_count(ticket.ticket_id),
                 "incident_open": self._incident_open_for_ticket(ticket),
                 "recommended_actions": progress["recommended_operational_actions"],
+                "service_cluster_id": ticket.service_cluster_id,
+                "future_cluster_ticket_count": cluster_summary["future_cluster_ticket_count"],
+                "active_incident_cover": cluster_summary["active_incident_cover"],
             },
         }
         if self._state.current_task_id == 3:
@@ -2142,6 +2533,8 @@ class HelpdeskTicketRoutingEnvironment(
             )
         ):
             history_entry["routing_options"] = self._routing_options_for_ticket(ticket)
+        if "lookup_queue_cluster_summary" in self._used_tools_for_ticket(ticket.ticket_id):
+            history_entry["cluster_summary"] = cluster_summary
         if penalty_reason is not None:
             history_entry["penalty_reason"] = penalty_reason
         if tool_result is not None:
@@ -2218,6 +2611,7 @@ class HelpdeskTicketRoutingEnvironment(
             "sla_breach_count": self._state.sla_breach_count,
             "incident_gap_total": self._state.incident_gap_total,
             "dynamic_queue_events": list(self._state.dynamic_queue_events[-5:]),
+            "clustered_follow_ons": self._future_queue_demand().get("clustered_follow_ons", 0),
         }
         if self._state.current_task_id == 3:
             metadata["capacity_state"] = self._capacity_state_snapshot()

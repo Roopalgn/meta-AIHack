@@ -89,6 +89,7 @@ AVAILABLE_TOOLS = (
     "lookup_requester_history",
     "lookup_internal_routing_note",
     "lookup_queue_capacity_forecast",
+    "lookup_queue_cluster_summary",
 )
 
 
@@ -282,6 +283,20 @@ def infer_ticket_cue(ticket: dict[str, Any]) -> str:
         )
     ):
         return "capacity_planning"
+    if (
+        int((ticket.get("operational_context") or {}).get("future_cluster_ticket_count", 0) or 0)
+        > 0
+        or any(
+            phrase in text
+            for phrase in (
+                "single coordinated owner",
+                "existing workstream",
+                "request cluster",
+                "parallel workstream",
+            )
+        )
+    ):
+        return "cluster_coordination"
     if any(
         phrase in text
         for phrase in ("re:", "follow-up", "following up", "regression", "reference ticket", "third update")
@@ -343,6 +358,8 @@ def preferred_tool_order(
     if last_tool_name == "lookup_requester_history":
         preferred_tools.append("lookup_internal_routing_note")
     if last_tool_name == "lookup_internal_routing_note":
+        preferred_tools.append("lookup_queue_cluster_summary")
+    if last_tool_name == "lookup_queue_cluster_summary":
         preferred_tools.append("lookup_queue_capacity_forecast")
 
     if any(
@@ -375,6 +392,9 @@ def preferred_tool_order(
     ):
         preferred_tools.append("lookup_requester_history")
 
+    if infer_ticket_cue(ticket) == "cluster_coordination":
+        preferred_tools.append("lookup_queue_cluster_summary")
+
     if infer_ticket_cue(ticket) == "capacity_planning":
         preferred_tools.append("lookup_queue_capacity_forecast")
 
@@ -383,6 +403,7 @@ def preferred_tool_order(
     if hidden_context_remaining:
         preferred_tools.extend(
             [
+                "lookup_queue_cluster_summary",
                 "lookup_queue_capacity_forecast",
                 "lookup_internal_routing_note",
                 "lookup_related_ticket",

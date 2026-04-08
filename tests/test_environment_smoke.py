@@ -242,6 +242,22 @@ class TestSeededDeterminism(unittest.TestCase):
 
         self.assertEqual(env1.state.queue_ticket_ids, env2.state.queue_ticket_ids)
 
+    def test_task3_queue_sampling_includes_clustered_follow_on(self) -> None:
+        env = _make_env()
+        env.reset(seed=42, task_id=3, queue_size=5)
+
+        cluster_ids = [
+            ticket.service_cluster_id for ticket in env._queue if ticket.service_cluster_id
+        ]
+        repeated_cluster_ids = {
+            cluster_id for cluster_id in cluster_ids if cluster_ids.count(cluster_id) >= 2
+        }
+
+        self.assertTrue(
+            repeated_cluster_ids,
+            f"Expected at least one repeated service_cluster_id in task 3 queue, got {cluster_ids}",
+        )
+
 
 class TestPerTicketScoreBounds(unittest.TestCase):
     """1.1.6 — all per-ticket scores stay in [0.0, 1.0] across a full episode."""

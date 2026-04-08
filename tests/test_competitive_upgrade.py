@@ -51,7 +51,7 @@ if "openenv.core.env_server.interfaces" not in sys.modules:
 from models import HelpdeskTicketAction, HelpdeskTicketObservation, HelpdeskTicketState
 from server.environment import HelpdeskTicketRoutingEnvironment
 from server.reward import compute_step_reward, compute_trajectory_reward
-from server.tasks import load_dataset
+from server.tasks import get_task_definition, load_dataset
 from vocabulary import ISSUE_TYPES, PRIORITIES, ASSIGNMENT_GROUPS, RESOLUTION_ACTIONS, TASK_IDS
 
 
@@ -543,6 +543,54 @@ class TestInvestigationActions(unittest.TestCase):
         obs = env.reset(seed=0, task_id=3, queue_size=1)
         return env, obs, ticket, related
 
+    def _make_cluster_env(self):
+        from unittest.mock import patch
+
+        dataset = load_dataset()
+        cluster_tickets = [
+            ticket
+            for ticket in dataset
+            if ticket.service_cluster_id == "atlasbank_lockout_bridge"
+        ]
+        self.assertGreaterEqual(len(cluster_tickets), 2, "Expected atlasbank cluster tickets")
+        root = next(
+            (
+                ticket
+                for ticket in cluster_tickets
+                if ticket.related_ticket_id is None
+            ),
+            None,
+        )
+        follow_up = next(
+            (
+                ticket
+                for ticket in cluster_tickets
+                if ticket.related_ticket_id is not None
+            ),
+            None,
+        )
+        self.assertIsNotNone(root, "Cluster root ticket missing")
+        self.assertIsNotNone(follow_up, "Cluster follow-up ticket missing")
+
+        env = _make_env()
+        patch_dataset = patch.object(env, "_dataset", [root, follow_up])
+        patch_lookup = patch.object(
+            env,
+            "_tickets_by_id",
+            {root.ticket_id: root, follow_up.ticket_id: follow_up},
+        )
+        patch_dataset.start()
+        patch_lookup.start()
+        self.addCleanup(patch_dataset.stop)
+        self.addCleanup(patch_lookup.stop)
+
+        env.reset(seed=0, task_id=3, queue_size=2)
+        env._queue = [root, follow_up]
+        env._sync_queue_ticket_ids()
+        env._state.current_ticket_index = 0
+        obs = env._build_observation(get_task_definition(3))
+        return env, obs, root, follow_up
+
     def test_investigation_action_does_not_advance_queue(self) -> None:
         env, obs, ticket, related = self._make_linked_env()
 
@@ -678,6 +726,89 @@ class TestInvestigationActions(unittest.TestCase):
         self.assertIn("preferred_route_label", obs.last_tool_result)
         self.assertIn("routing_options", obs.current_ticket)
         self.assertGreaterEqual(len(obs.current_ticket["routing_options"]), 2)
+
+    def test_queue_cluster_summary_reveals_future_cluster_load(self) -> None:
+        env, obs, root, follow_up = self._make_cluster_env()
+
+        obs = env.step(
+            HelpdeskTicketAction(
+                action_type="investigate",
+                tool_name="lookup_queue_cluster_summary",
+            )
+        )
+
+        self.assertEqual(obs.last_tool_result["tool_name"], "lookup_queue_cluster_summary")
+        self.assertTrue(obs.last_tool_result["found"])
+        self.assertEqual(obs.last_tool_result["future_cluster_ticket_count"], 1)
+        self.assertEqual(
+            obs.last_tool_result["future_cluster_ticket_ids"],
+            [follow_up.ticket_id],
+        )
+        self.assertIn("cluster_summary", obs.current_ticket)
+
+    def test_good_cluster_handling_stabilizes_future_follow_up(self) -> None:
+        env, obs, root, follow_up = self._make_cluster_env()
+
+        while (obs.current_ticket or {}).get("context_status", {}).get(
+            "hidden_context_remaining"
+        ):
+            tool_name = (
+                (obs.current_ticket or {})
+                .get("context_status", {})
+                .get("recommended_tools", [None])[0]
+            )
+            self.assertIsNotNone(tool_name)
+            obs = env.step(
+                HelpdeskTicketAction(
+                    action_type="investigate",
+                    tool_name=tool_name,
+                )
+            )
+        obs = env.step(HelpdeskTicketAction(action_type="open_incident"))
+        obs = env.step(
+            HelpdeskTicketAction(
+                issue_type=root.issue_type,
+                priority=root.priority,
+                assignment_group=root.assignment_group,
+                resolution_action=root.resolution_action,
+            )
+        )
+
+        self.assertFalse(obs.done)
+        self.assertEqual(obs.current_ticket["ticket_id"], follow_up.ticket_id)
+        self.assertTrue(obs.current_ticket["operational_context"]["active_incident_cover"])
+        self.assertIn(
+            follow_up.ticket_id,
+            obs.history[-1]["reward_components"]["cluster_stabilized_ticket_ids"],
+        )
+        stabilized_follow_up = env._queue[env.state.current_ticket_index]
+        self.assertEqual(stabilized_follow_up.alternate_assignment_group, "service_desk")
+        self.assertGreaterEqual(stabilized_follow_up.alternate_route_score_multiplier, 0.9)
+
+    def test_bad_cluster_handling_escalates_future_follow_up(self) -> None:
+        env, obs, root, follow_up = self._make_cluster_env()
+
+        obs = env.step(
+            HelpdeskTicketAction(
+                issue_type="general_inquiry",
+                priority="low",
+                assignment_group="service_desk",
+                resolution_action="acknowledge",
+            )
+        )
+
+        self.assertFalse(obs.done)
+        self.assertEqual(obs.current_ticket["ticket_id"], follow_up.ticket_id)
+        self.assertIn(
+            follow_up.ticket_id,
+            obs.history[-1]["reward_components"]["cluster_destabilized_ticket_ids"],
+        )
+        escalated_follow_up = env._queue[env.state.current_ticket_index]
+        self.assertNotEqual(escalated_follow_up.priority, follow_up.priority)
+        self.assertIn(
+            "did not fully resolve the blocker",
+            escalated_follow_up.customer_update_note or "",
+        )
 
     def test_submit_without_required_investigation_gets_shaping_penalty(self) -> None:
         from unittest.mock import patch

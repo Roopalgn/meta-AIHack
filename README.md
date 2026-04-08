@@ -35,7 +35,7 @@ The environment models a realistic helpdesk workflow:
 1. a new ticket enters the queue
 2. the agent reads the ticket title and description
 3. the agent may investigate, request more information, open an incident, defer the ticket, or submit a routing decision
-4. the queue state mutates: capacity shrinks, incidents stay open, deferred tickets return later, and poor handling can spawn follow-up tickets
+4. the queue state mutates: capacity shrinks, incidents stay open, deferred tickets return later, poor handling can spawn follow-up tickets, and good or bad handling can reshape later tickets in the same request cluster
 5. the grader assigns deterministic credit
 6. the environment advances until the queue is complete
 
@@ -58,7 +58,7 @@ The project uses a queue-based episode model.
 - `reset()` samples a task and a queue of 3 to 5 tickets
 - `step()` lets the agent investigate, request clarification, defer, open incidents, or submit one ticket at a time
 - `state()` exposes the internal episode snapshot
-- hard-task episodes also track queue-level capacity, incident slots, alternate acceptable routes, planning penalties, SLA pressure, and dynamic follow-up tickets across the queue
+- hard-task episodes also track queue-level capacity, incident slots, clustered follow-on tickets, alternate acceptable routes, planning penalties, SLA pressure, and dynamic follow-up tickets across the queue
 - final evaluation is based on the queue outcome, not on isolated per-ticket classification alone
 
 The environment classes and vocabulary are intentionally frozen to keep collaboration and judging simple.
@@ -71,7 +71,7 @@ That gives the project a meaningful improvement loop for judge demos:
 
 - compare `no_investigation`, `investigate_when_context_hidden`, and `adaptive_cue_bandit`
 - log per-step rewards, feedback summaries, planning penalties, and reward components to JSONL
-- learn when to use `lookup_queue_capacity_forecast` versus the other investigation tools
+- learn when to use `lookup_queue_capacity_forecast` and `lookup_queue_cluster_summary` versus the other investigation tools
 - select the best policy on train seeds, then re-evaluate it on holdout seeds
 
 Example commands:
@@ -100,7 +100,7 @@ The default submit policy inside this runner stays deterministic and local. It r
 |----|------|------------|-----------------|-------------------------|
 | 1 | Guided Full Routing | Easy | `issue_type`, `priority`, `assignment_group`, `resolution_action` | route a mostly visible ticket correctly |
 | 2 | Contextual Full Routing | Medium | `issue_type`, `priority`, `assignment_group`, `resolution_action` | route under partial observability with investigation and clarification |
-| 3 | Adaptive Queue Routing | Hard | `issue_type`, `priority`, `assignment_group`, `resolution_action` | route while managing queue pressure, incidents, deferrals, and downstream follow-ups |
+| 3 | Adaptive Queue Routing | Hard | `issue_type`, `priority`, `assignment_group`, `resolution_action` | route while managing queue pressure, incidents, clustered follow-ons, deferrals, and downstream follow-ups |
 
 ## Locked Vocabulary
 
@@ -224,17 +224,20 @@ Available tools:
 - `lookup_requester_history`
 - `lookup_internal_routing_note`
 - `lookup_queue_capacity_forecast`
+- `lookup_queue_cluster_summary`
 
 Hard-task investigation behavior:
 
 - some ambiguous and non-default-routing tickets start with both redacted titles and redacted descriptions
 - linked-ticket previews and internal routing notes stay hidden until the matching tool is used
 - capacity-sensitive tickets can expose queue pressure, future demand, and alternate routing options through `lookup_queue_capacity_forecast`
+- cluster-sensitive tickets can expose future related tickets, shared-requester load, and active incident coverage through `lookup_queue_cluster_summary`
 - only useful investigation steps return a small positive shaping reward
 - blind or repeated probing does not pay by default
 - premature hard-task submission can incur a shaping penalty even when the visible text looks plausible
 - resource-greedy routing can add planning penalties later in the queue even when a single ticket looks correct in isolation
 - incident-sensitive tickets can require an explicit `open_incident` step to avoid future follow-up debt
+- strong handling on an earlier clustered ticket can make later tickets cheaper to acknowledge, while weak handling can escalate those later tickets
 - bad or incomplete hard-task handling can append a deterministic follow-up ticket later in the same episode
 - terminal `rubric_reward` remains the objective evaluation signal, while per-step `reward` is the denser training signal
 
