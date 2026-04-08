@@ -225,6 +225,50 @@ class TestExtraFieldsPenalty(unittest.TestCase):
         self.assertGreater(env.state.total_reward, 0.0)
         self.assertLess(env.state.total_reward, 1.0)
 
+    def test_missing_required_submit_fields_use_consistent_penalty_path(self) -> None:
+        env = _make_env()
+        obs = env.reset(seed=42, task_id=1)
+
+        # Task 1 requires full routing; providing only issue_type should be penalized.
+        penalty_obs = env.step(HelpdeskTicketAction(issue_type=ISSUE_TYPES[0]))
+
+        self.assertIsInstance(penalty_obs, HelpdeskTicketObservation)
+        self.assertEqual(penalty_obs.tickets_processed, 1)
+        self.assertIn("penalty_reason", penalty_obs.history[0])
+        self.assertIn("missing_submit_fields", penalty_obs.history[0]["penalty_reason"])
+        self.assertEqual(penalty_obs.last_reward_components.get("invalid_action"), True)
+
+    def test_investigate_without_tool_name_penalized_not_raised(self) -> None:
+        env = _make_env()
+        env.reset(seed=42, task_id=1)
+
+        try:
+            penalty_obs = env.step(HelpdeskTicketAction(action_type="investigate"))
+        except Exception as exc:  # noqa: BLE001
+            self.fail(f"Expected penalty observation, but step() raised: {exc}")
+
+        self.assertIsInstance(penalty_obs, HelpdeskTicketObservation)
+        self.assertIn("penalty_reason", penalty_obs.history[-1])
+        self.assertIn("require tool_name", penalty_obs.history[-1]["penalty_reason"])
+        self.assertGreaterEqual(penalty_obs.reward, 0.0)
+        self.assertLessEqual(penalty_obs.reward, 1.0)
+
+    def test_open_incident_with_submit_fields_penalized_consistently(self) -> None:
+        env = _make_env()
+        env.reset(seed=42, task_id=3)
+
+        penalty_obs = env.step(
+            HelpdeskTicketAction(
+                action_type="open_incident",
+                issue_type="identity_access",
+            )
+        )
+
+        self.assertIn("penalty_reason", penalty_obs.history[-1])
+        self.assertIn("cannot include submit fields", penalty_obs.history[-1]["penalty_reason"])
+        self.assertEqual(penalty_obs.last_reward_components.get("reward_kind"), "step_penalty")
+        self.assertEqual(penalty_obs.last_reward_components.get("invalid_action"), True)
+
 
 if __name__ == "__main__":
     unittest.main()

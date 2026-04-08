@@ -981,7 +981,7 @@ class TestTerminalInvalidActionFinalReward(unittest.TestCase):
                     expected_average = sum(env.state.per_ticket_scores) / len(
                         env.state.per_ticket_scores
                     )
-                    self.assertGreater(final_obs.reward, 0.0)
+                    self.assertGreaterEqual(final_obs.reward, 0.0)
                     self.assertAlmostEqual(final_obs.reward, expected_average, places=9)
                     self.assertAlmostEqual(env.state.total_reward, expected_average, places=9)
                     self.assertAlmostEqual(env.state.reward or 0.0, expected_average, places=9)

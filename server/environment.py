@@ -93,6 +93,10 @@ TASK3_INVESTIGATION_TOOL_PLAN: dict[str, tuple[str, ...]] = {
     "ticket-029": ("lookup_internal_routing_note",),
     "ticket-038": ("lookup_related_ticket", "lookup_requester_history"),
     "ticket-045": ("lookup_related_ticket", "lookup_requester_history"),
+    "ticket-072": ("lookup_internal_routing_note", "lookup_requester_history"),
+    "ticket-073": ("lookup_internal_routing_note", "lookup_requester_history"),
+    "ticket-074": ("lookup_related_ticket", "lookup_internal_routing_note"),
+    "ticket-075": ("lookup_internal_routing_note", "lookup_queue_capacity_forecast"),
     "TKT-NONDEFAULT-001": ("lookup_internal_routing_note",),
     "TKT-NONDEFAULT-002": ("lookup_internal_routing_note",),
     "TKT-NONDEFAULT-003": ("lookup_internal_routing_note",),
@@ -123,6 +127,22 @@ HARD_TASK_DESCRIPTION_REDACTIONS: dict[str, str] = {
         "A company-wide suspension remains unresolved after repeated follow-ups. "
         "Additional routing context is available via investigation."
     ),
+    "ticket-072": (
+        "A mission-critical finance workflow is blocked, and the ticket text mixes "
+        "security and billing signals. Additional routing context is available via investigation."
+    ),
+    "ticket-073": (
+        "An escalation reports a recurring platform failure but omits key diagnostics. "
+        "Additional routing context is available via investigation."
+    ),
+    "ticket-074": (
+        "An urgent vendor-renewal message may also be a security threat. "
+        "Additional routing context is available via investigation."
+    ),
+    "ticket-075": (
+        "Intermittent performance degradation is reported without a clear blast radius. "
+        "Additional routing context is available via investigation."
+    ),
     "TKT-NONDEFAULT-001": (
         "A user needs help with a billing-style question. "
         "Additional routing context is available via investigation."
@@ -144,6 +164,10 @@ HARD_TASK_TITLE_REDACTIONS: dict[str, str] = {
     "ticket-029": "Urgent expansion request",
     "ticket-038": "Repeated invoice follow-up",
     "ticket-045": "Company-wide account issue",
+    "ticket-072": "Critical workflow with mixed ownership",
+    "ticket-073": "Escalation with missing diagnostics",
+    "ticket-074": "Possible phishing versus renewal request",
+    "ticket-075": "Unscoped performance incident question",
     "TKT-NONDEFAULT-001": "Billing-style routing question",
     "TKT-NONDEFAULT-002": "Compliance ownership question",
     "TKT-NONDEFAULT-003": "Workflow blocker with hidden owner",
@@ -193,15 +217,19 @@ class HelpdeskTicketRoutingEnvironment(
         task = get_task_definition(task_id)
         if queue_size_value is not None and queue_size_value < 1:
             raise ValueError("queue_size must be >= 1")
-
-        if normalized_seed is not None:
-            self._rng.seed(normalized_seed)
+        effective_seed = self._initialize_episode_seed(normalized_seed)
 
         if queue_size_value is None:
             queue_size = self._rng.randint(*QUEUE_SIZE_RANGE)
         else:
             queue_size = min(queue_size_value, len(self._dataset))
         self._queue = self._sample_queue(task_id, min(queue_size, len(self._dataset)))
+        queue_ticket_ids = [ticket.ticket_id for ticket in self._queue]
+        resolved_episode_id = episode_id or self._default_episode_id(
+            task_id=task_id,
+            seed=effective_seed,
+            queue_ticket_ids=queue_ticket_ids,
+        )
         (
             team_capacity_initial,
             high_priority_slots_initial,
@@ -210,16 +238,16 @@ class HelpdeskTicketRoutingEnvironment(
         ) = self._initial_capacity_state_for_queue(task_id)
 
         self._state = HelpdeskTicketState(
-            episode_id=episode_id or str(uuid.uuid4()),
+            episode_id=resolved_episode_id,
             step_count=0,
             current_task_id=task_id,
-            seed=normalized_seed,
-            queue_ticket_ids=[t.ticket_id for t in self._queue],
+            seed=effective_seed,
+            queue_ticket_ids=queue_ticket_ids,
             current_ticket_index=0,
             per_ticket_scores=[],
             total_reward=0.0,
             average_score_so_far=0.0,
-            investigation_budget_remaining=queue_size * FREE_INVESTIGATIONS_PER_TICKET,
+            investigation_budget_remaining=len(self._queue) * FREE_INVESTIGATIONS_PER_TICKET,
             investigation_penalty_applied=0.0,
             planning_penalty_applied=0.0,
             last_reward_components={},
@@ -268,9 +296,18 @@ class HelpdeskTicketRoutingEnvironment(
         current_ticket = self._queue[idx]
         task_id = self._state.current_task_id
         task = get_task_definition(task_id)
-        if action.action_type not in self._available_action_types_for_task(task_id):
-            raise ValueError(
-                f"Unsupported action_type {action.action_type!r} for task {task_id}"
+        validation_error = self._validate_action_contract(
+            action,
+            task=task,
+            task_id=task_id,
+        )
+        if validation_error is not None:
+            return self._apply_invalid_action_penalty(
+                task=task,
+                current_ticket=current_ticket,
+                action=action,
+                queue_index=idx,
+                penalty_reason=validation_error,
             )
 
         if action.action_type == "investigate":
@@ -281,95 +318,6 @@ class HelpdeskTicketRoutingEnvironment(
             return self._handle_defer_action(task, current_ticket, action, idx)
         if action.action_type == "open_incident":
             return self._handle_open_incident_action(task, current_ticket, action, idx)
-
-        submitted_fields = {
-            f
-            for f, v in action.model_dump(exclude_none=True).items()
-            if v is not None
-            and f not in {"action_type", "tool_name", "tool_target_ticket_id", "metadata"}
-        }
-        allowed = set(task["allowed_fields"])
-        extra_fields = submitted_fields - allowed
-        if extra_fields:
-            # Penalty: record an open-interval score, advance index, return penalty observation
-            invalid_score = clamp_open_unit_interval(0.0)
-            self._state.per_ticket_scores.append(invalid_score)
-            self._state.average_score_so_far = self._current_average_score()
-            self._state.step_count += 1
-            self._state.current_ticket_index += 1
-            is_done = self._state.current_ticket_index >= len(self._queue)
-            self._state.done = is_done
-            trajectory_reward = None
-            trajectory_components = None
-            investigation_penalty = self._compute_episode_penalty() if is_done else 0.0
-            rubric_details: dict[str, Any] = {}
-            if is_done:
-                trajectory_components = compute_trajectory_adjustments(
-                    self._state.per_ticket_scores,
-                    len(self._queue),
-                    self._state.step_count,
-                    completion_bonus=self._trajectory_consistency_bonus(),
-                )
-                trajectory_reward = trajectory_components["final_reward"]
-                final_reward, rubric_details = self._finalize_terminal_rubric(
-                    trajectory_reward
-                )
-                self._state.total_reward = final_reward
-            else:
-                final_reward = clamp_open_unit_interval(0.0)
-            reward_components = self._build_reward_components(
-                ticket_score=invalid_score,
-                field_breakdown={},
-                shaped_step_reward=0.0,
-                reward_kind="trajectory" if is_done else "step_penalty",
-                final_reward=final_reward,
-                trajectory_reward=trajectory_reward,
-                investigation_penalty=investigation_penalty,
-                penalty_reason=f"extra_fields: {sorted(extra_fields)}",
-                extra_details={
-                    "trajectory_average_reward": (
-                        trajectory_components["average_reward"]
-                        if trajectory_components is not None
-                        else None
-                    ),
-                    "trajectory_completion_bonus": (
-                        trajectory_components["completion_bonus"]
-                        if trajectory_components is not None
-                        else None
-                    ),
-                    "trajectory_consistency_bonus": (
-                        trajectory_components["consistency_bonus"]
-                        if trajectory_components is not None
-                        else None
-                    ),
-                    **rubric_details,
-                },
-            )
-            self._state.history_entries.append(
-                self._build_history_entry(
-                    current_ticket,
-                    predicted=action.model_dump(exclude_none=True),
-                    score=invalid_score,
-                    breakdown={},
-                    queue_position=idx + 1,
-                    reward=final_reward,
-                    rubric_reward=final_reward if is_done else None,
-                    reward_kind="trajectory" if is_done else "step_penalty",
-                    penalty_reason=f"extra_fields: {sorted(extra_fields)}",
-                    reward_components=reward_components,
-                )
-            )
-            self._state.last_step_reward = final_reward
-            self._state.reward = final_reward
-            self._state.investigation_penalty_applied = self._compute_episode_penalty()
-            self._state.last_tool_result = None
-            self._state.last_reward_components = reward_components
-            return self._build_observation(
-                task,
-                done=is_done,
-                reward=final_reward,
-                rubric_reward=final_reward if is_done else None,
-            )
 
         previous_average = self._current_average_score()
         score, breakdown = grade_action(action, current_ticket, task_id)
@@ -561,6 +509,163 @@ class HelpdeskTicketRoutingEnvironment(
     # ------------------------------------------------------------------
     # Helpers
     # ------------------------------------------------------------------
+
+    def _initialize_episode_seed(self, normalized_seed: int | None) -> int:
+        if normalized_seed is None:
+            normalized_seed = random.SystemRandom().randint(0, 2**31 - 1)
+        self._rng.seed(normalized_seed)
+        return normalized_seed
+
+    def _default_episode_id(
+        self,
+        *,
+        task_id: int,
+        seed: int,
+        queue_ticket_ids: list[str],
+    ) -> str:
+        material = f"{task_id}:{seed}:{','.join(queue_ticket_ids)}"
+        return str(uuid.uuid5(uuid.NAMESPACE_URL, material))
+
+    def _submit_fields_for_action(self, action: HelpdeskTicketAction) -> set[str]:
+        return {
+            field
+            for field in ("issue_type", "priority", "assignment_group", "resolution_action")
+            if getattr(action, field) is not None
+        }
+
+    def _validate_action_contract(
+        self,
+        action: HelpdeskTicketAction,
+        *,
+        task: dict[str, Any],
+        task_id: int,
+    ) -> str | None:
+        available_action_types = set(self._available_action_types_for_task(task_id))
+        if action.action_type not in available_action_types:
+            return (
+                f"unsupported_action_type: {action.action_type!r}; "
+                f"available={sorted(available_action_types)}"
+            )
+
+        submit_fields = self._submit_fields_for_action(action)
+        allowed_submit_fields = set(task["allowed_fields"])
+        extra_submit_fields = sorted(submit_fields - allowed_submit_fields)
+        missing_submit_fields = sorted(allowed_submit_fields - submit_fields)
+
+        if action.action_type == "submit":
+            if action.tool_name is not None or action.tool_target_ticket_id is not None:
+                return "submit action cannot include tool fields"
+            if extra_submit_fields:
+                return f"extra_submit_fields: {extra_submit_fields}"
+            if missing_submit_fields:
+                return f"missing_submit_fields: {missing_submit_fields}"
+            return None
+
+        if submit_fields:
+            return (
+                f"{action.action_type} actions cannot include submit fields: "
+                f"{sorted(submit_fields)}"
+            )
+
+        if action.action_type == "investigate":
+            if action.tool_name is None:
+                return "investigate actions require tool_name"
+            available_tools = set(self._available_tools_for_task(task_id))
+            if action.tool_name not in available_tools:
+                return (
+                    f"unsupported_tool_name: {action.tool_name!r}; "
+                    f"available={sorted(available_tools)}"
+                )
+        elif action.tool_name is not None or action.tool_target_ticket_id is not None:
+            return f"{action.action_type} actions cannot include tool fields"
+        return None
+
+    def _apply_invalid_action_penalty(
+        self,
+        *,
+        task: dict[str, Any],
+        current_ticket: HelpdeskTicketRecord,
+        action: HelpdeskTicketAction,
+        queue_index: int,
+        penalty_reason: str,
+    ) -> HelpdeskTicketObservation:
+        invalid_score = clamp_open_unit_interval(0.0)
+        self._state.per_ticket_scores.append(invalid_score)
+        self._state.average_score_so_far = self._current_average_score()
+        self._state.step_count += 1
+        self._state.current_ticket_index += 1
+        is_done = self._state.current_ticket_index >= len(self._queue)
+        self._state.done = is_done
+        trajectory_reward = None
+        trajectory_components = None
+        investigation_penalty = self._compute_episode_penalty() if is_done else 0.0
+        rubric_details: dict[str, Any] = {}
+        if is_done:
+            trajectory_components = compute_trajectory_adjustments(
+                self._state.per_ticket_scores,
+                len(self._queue),
+                self._state.step_count,
+                completion_bonus=self._trajectory_consistency_bonus(),
+            )
+            trajectory_reward = trajectory_components["final_reward"]
+            final_reward, rubric_details = self._finalize_terminal_rubric(trajectory_reward)
+            self._state.total_reward = final_reward
+        else:
+            final_reward = clamp_open_unit_interval(0.0)
+        reward_components = self._build_reward_components(
+            ticket_score=invalid_score,
+            field_breakdown={},
+            shaped_step_reward=0.0,
+            reward_kind="trajectory" if is_done else "step_penalty",
+            final_reward=final_reward,
+            trajectory_reward=trajectory_reward,
+            investigation_penalty=investigation_penalty,
+            penalty_reason=penalty_reason,
+            extra_details={
+                "invalid_action": True,
+                "trajectory_average_reward": (
+                    trajectory_components["average_reward"]
+                    if trajectory_components is not None
+                    else None
+                ),
+                "trajectory_completion_bonus": (
+                    trajectory_components["completion_bonus"]
+                    if trajectory_components is not None
+                    else None
+                ),
+                "trajectory_consistency_bonus": (
+                    trajectory_components["consistency_bonus"]
+                    if trajectory_components is not None
+                    else None
+                ),
+                **rubric_details,
+            },
+        )
+        self._state.history_entries.append(
+            self._build_history_entry(
+                current_ticket,
+                predicted=action.model_dump(exclude_none=True),
+                score=invalid_score,
+                breakdown={},
+                queue_position=queue_index + 1,
+                reward=final_reward,
+                rubric_reward=final_reward if is_done else None,
+                reward_kind="trajectory" if is_done else "step_penalty",
+                penalty_reason=penalty_reason,
+                reward_components=reward_components,
+            )
+        )
+        self._state.last_step_reward = final_reward
+        self._state.reward = final_reward
+        self._state.investigation_penalty_applied = self._compute_episode_penalty()
+        self._state.last_tool_result = None
+        self._state.last_reward_components = reward_components
+        return self._build_observation(
+            task,
+            done=is_done,
+            reward=final_reward,
+            rubric_reward=final_reward if is_done else None,
+        )
 
     def _compute_episode_penalty(self) -> float:
         free_investigations = len(self._queue) * FREE_INVESTIGATIONS_PER_TICKET

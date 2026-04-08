@@ -83,6 +83,10 @@ def _run_full_episode(env: HelpdeskTicketRoutingEnvironment, task_id: int, seed:
     return results
 
 
+def _episode_reward_trajectory(results: list[tuple[HelpdeskTicketObservation, float | None]]) -> list[float]:
+    return [float(reward or 0.0) for _, reward in results]
+
+
 # ---------------------------------------------------------------------------
 # Test cases
 # ---------------------------------------------------------------------------
@@ -243,6 +247,26 @@ class TestSeededDeterminism(unittest.TestCase):
         env2.reset(seed=7, task_id=3)
 
         self.assertEqual(env1.state.queue_ticket_ids, env2.state.queue_ticket_ids)
+
+    def test_same_seed_same_reward_trajectory(self) -> None:
+        env1 = _make_env()
+        env2 = _make_env()
+
+        results1 = _run_full_episode(env1, task_id=3, seed=42)
+        results2 = _run_full_episode(env2, task_id=3, seed=42)
+
+        self.assertEqual(_episode_reward_trajectory(results1), _episode_reward_trajectory(results2))
+        self.assertEqual(env1.state.per_ticket_scores, env2.state.per_ticket_scores)
+        self.assertEqual(env1.state.total_reward, env2.state.total_reward)
+
+    def test_same_seed_same_default_episode_id(self) -> None:
+        env1 = _make_env()
+        env2 = _make_env()
+
+        env1.reset(seed=42, task_id=2)
+        env2.reset(seed=42, task_id=2)
+
+        self.assertEqual(env1.state.episode_id, env2.state.episode_id)
 
     def test_task3_queue_sampling_includes_clustered_follow_on(self) -> None:
         env = _make_env()

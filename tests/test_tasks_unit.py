@@ -119,6 +119,33 @@ class TasksAndDatasetUnitTests(unittest.TestCase):
         self.assertGreaterEqual(alternate_route_count, 10)
         self.assertGreaterEqual(clustered_case_count, 10)
 
+    def test_edge_case_ticket_block_is_present(self) -> None:
+        dataset = load_dataset()
+        by_id = {record.ticket_id: record for record in dataset}
+
+        for ticket_id in ("ticket-072", "ticket-073", "ticket-074", "ticket-075"):
+            self.assertIn(ticket_id, by_id, f"Missing curated edge-case ticket {ticket_id}")
+
+        self.assertEqual(by_id["ticket-072"].issue_type, "identity_access")
+        self.assertEqual(by_id["ticket-073"].assignment_group, "service_desk")
+        self.assertEqual(by_id["ticket-074"].issue_type, "spam_phishing")
+        self.assertTrue(by_id["ticket-075"].incident_recommended)
+
+    def test_edge_case_tickets_include_ambiguity_and_alternate_routes(self) -> None:
+        dataset = load_dataset()
+        edge_case_ids = {"ticket-072", "ticket-073", "ticket-074", "ticket-075"}
+        edge_cases = [record for record in dataset if record.ticket_id in edge_case_ids]
+
+        self.assertEqual(len(edge_cases), 4)
+        self.assertTrue(all(record.ambiguity_note for record in edge_cases))
+        self.assertTrue(
+            all(record.alternate_route_score_multiplier > 0.0 for record in edge_cases)
+        )
+        self.assertTrue(
+            all(record.planning_note for record in edge_cases),
+            "Edge-case tickets should carry planning guidance for hard-task routing.",
+        )
+
     def test_load_dataset_accepts_utf8_bom(self) -> None:
         sample = (
             b"\xef\xbb\xbf"

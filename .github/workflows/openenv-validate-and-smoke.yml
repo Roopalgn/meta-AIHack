@@ -1,0 +1,41 @@
+name: OpenEnv Validate And Smoke
+
+on:
+  workflow_dispatch:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  validate-and-smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+
+    steps:
+      - name: Check out repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
+          python -m pip install -e .
+
+      - name: Validate OpenEnv contract
+        run: openenv validate
+
+      - name: Run deterministic baseline reproducibility check
+        run: |
+          python scripts/baseline_repro_check.py --seeds 42-46 --task-ids 1,2,3 --expect-min 0.40 --expect-max 0.95
+
+      - name: Run smoke tests
+        run: |
+          export PYTHONPATH="$PWD/tests:$PWD"
+          python -m unittest tests.test_environment_smoke tests.test_reward_transparency -v

@@ -84,6 +84,8 @@ TASK_WEIGHTS = {
     },
 }
 
+SCORE_BAND_CONTRAST = 1.12
+
 
 def _normalized(value: str | None) -> str:
     return (value or "").strip().lower()
@@ -173,6 +175,15 @@ def _alternate_route_available(ticket: HelpdeskTicketRecord) -> bool:
     ) and ticket.alternate_route_score_multiplier > 0.0
 
 
+def calibrate_task_score(raw_score: float) -> float:
+    bounded = max(0.0, min(1.0, raw_score))
+    if bounded in {0.0, 1.0}:
+        return bounded
+    centered = bounded - 0.5
+    contrasted = 0.5 + (centered * SCORE_BAND_CONTRAST)
+    return max(0.0, min(1.0, round(contrasted, 4)))
+
+
 def grade_action(
     action: HelpdeskTicketAction,
     ticket: HelpdeskTicketRecord,
@@ -211,6 +222,6 @@ def grade_action(
             chosen_score = alternate_score
             chosen_field_scores = alternate_field_scores
 
-    score = max(0.0, min(1.0, chosen_score))
+    score = calibrate_task_score(chosen_score)
     breakdown = {field: chosen_field_scores[field] for field in TASK_WEIGHTS[task_id]}
     return score, breakdown

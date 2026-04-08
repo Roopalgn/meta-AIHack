@@ -102,6 +102,18 @@ The default submit policy inside this runner stays deterministic and local. It r
 | 2 | Contextual Full Routing | Medium | `issue_type`, `priority`, `assignment_group`, `resolution_action` | route under partial observability with investigation, clarification, and moderate queue carry-over |
 | 3 | Adaptive Queue Routing | Hard | `issue_type`, `priority`, `assignment_group`, `resolution_action` | route while managing queue pressure, incidents, clustered follow-ons, deferrals, and downstream follow-ups |
 
+## Action And Observation Contract (Concise)
+
+| Contract Surface | Fields / Types | Rules |
+|------------------|----------------|-------|
+| Action (submit) | `action_type="submit"` plus all required routing fields (`issue_type`, `priority`, `assignment_group`, `resolution_action`) | Missing or extra submit fields are treated as invalid and get a deterministic penalty step |
+| Action (investigate) | `action_type="investigate"`, `tool_name`, optional `tool_target_ticket_id` | Submit fields are not allowed; unsupported tools are penalized deterministically |
+| Action (operational) | `action_type in {"request_info","defer","open_incident"}` | Submit fields and tool fields are not allowed; malformed payloads are penalized deterministically |
+| Observation core | `done: bool`, `reward: float-or-null`, `rubric_reward: float-or-null`, `current_ticket: object-or-null`, queue counters | `reward` is per-step signal, `rubric_reward` appears on terminal observations |
+| Observation routing contract | `allowed_fields: list[str]`, `available_action_types: list[str]`, `available_tools: list[str]` | Agents must obey these lists; invalid actions are graded as penalty steps |
+| Determinism guarantee | `reset(seed=...)` controls queue sampling and episode transitions | Same seed + task + action sequence => same queue order, rewards, and episode trajectory |
+| Episode termination | `done=True` when queue is exhausted with no pending follow-up ticket | Terminal step includes final queue-level rubric and terminal `reward` |
+
 ## Locked Vocabulary
 
 ### Issue types
@@ -451,6 +463,12 @@ To reproduce the multi-task local benchmark sweep:
 RUN_ALL_TASKS=1 python inference.py
 ```
 
+For baseline reproducibility gating over fixed seeds:
+
+```bash
+python scripts/baseline_repro_check.py --seeds 42-46 --task-ids 1,2,3 --expect-min 0.40 --expect-max 0.95
+```
+
 ## Runtime Validation Snapshot
 
 The repo has now completed both the first local heuristic validation pass and a merged-state rerun on the current `main` branch.
@@ -498,6 +516,8 @@ RUN_ALL_TASKS=1 python inference.py
 If you publish the container on a different host port, set `ENV_URL` accordingly before running `inference.py`.
 
 If local Docker is blocked by machine setup, the repo also includes a GitHub Actions smoke test at `.github/workflows/docker-smoke-test.yml`. That workflow builds the image on a GitHub-hosted runner, starts the container, checks `/health` and `/tasks`, and runs heuristic `inference.py` against the container.
+
+OpenEnv compliance and reproducibility regression checks are also enforced in `.github/workflows/openenv-validate-and-smoke.yml`, which runs `openenv validate`, the seeded baseline reproducibility command, and smoke tests.
 
 ## API Surface
 

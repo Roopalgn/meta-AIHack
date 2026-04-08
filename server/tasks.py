@@ -568,6 +568,119 @@ CURATED_EXPANSION_RECORDS: list[dict] = [
         "alternate_resolution_action": "fulfill",
         "alternate_route_score_multiplier": 0.83,
     },
+    {
+        "ticket_id": "ticket-072",
+        "title": "Payroll lockout plus duplicate charge escalation before cutoff",
+        "requester": "finance-ops@northbridge.io",
+        "description": (
+            "The controller cannot access the payroll dashboard after an MFA reset, "
+            "and finance also reports a duplicate seat charge in the same window. "
+            "They asked for one accountable owner before payroll cutoff."
+        ),
+        "issue_type": "identity_access",
+        "priority": "high",
+        "assignment_group": "security_team",
+        "resolution_action": "escalate",
+        "ambiguity_note": (
+            "Security lockout is blocking operations, but billing remediation is also urgent."
+        ),
+        "planning_note": (
+            "Security should own initial incident triage. If security capacity is constrained, "
+            "license operations can own the financial remediation path while security remains on call."
+        ),
+        "customer_update_note": (
+            "Finance asked for one owner and one timeline update before payroll cutoff."
+        ),
+        "incident_recommended": True,
+        "service_cluster_id": "northbridge_payroll_bridge",
+        "alternate_issue_type": "billing_license",
+        "alternate_assignment_group": "license_ops",
+        "alternate_resolution_action": "assign",
+        "alternate_route_score_multiplier": 0.74,
+    },
+    {
+        "ticket_id": "ticket-073",
+        "title": "Escalation says 'system broken again' but omits key diagnostics",
+        "requester": "opslead@harboranalytics.com",
+        "description": (
+            "An internal escalation only says the platform is broken again. "
+            "No service name, region, error code, or failing workflow was provided."
+        ),
+        "issue_type": "application_support",
+        "priority": "medium",
+        "assignment_group": "service_desk",
+        "resolution_action": "assign",
+        "ambiguity_note": (
+            "Critical context is missing, so ownership and urgency are both ambiguous."
+        ),
+        "planning_note": (
+            "Service desk should gather minimum diagnostics first. If real customer impact is "
+            "confirmed, route directly to application engineering with escalation."
+        ),
+        "customer_update_note": (
+            "The requester confirmed no blast-radius estimate is available yet."
+        ),
+        "alternate_priority": "high",
+        "alternate_assignment_group": "application_team",
+        "alternate_resolution_action": "escalate",
+        "alternate_route_score_multiplier": 0.71,
+    },
+    {
+        "ticket_id": "ticket-074",
+        "title": "Urgent vendor renewal mail might be phishing",
+        "requester": "procurement@solaraid.io",
+        "description": (
+            "Procurement received an urgent renewal email that appears to come from a known "
+            "vendor contact, but the embedded approval URL uses an unfamiliar domain."
+        ),
+        "issue_type": "spam_phishing",
+        "priority": "high",
+        "assignment_group": "security_team",
+        "resolution_action": "escalate",
+        "related_ticket_id": "ticket-051",
+        "ambiguity_note": (
+            "Message contains both commercial-renewal content and phishing indicators."
+        ),
+        "planning_note": (
+            "Security should triage first. If verified legitimate, procurement can own the "
+            "renewal routing without opening a parallel security stream."
+        ),
+        "service_cluster_id": "solaraid_vendor_review",
+        "alternate_issue_type": "service_request",
+        "alternate_priority": "medium",
+        "alternate_assignment_group": "procurement",
+        "alternate_resolution_action": "assign",
+        "alternate_route_score_multiplier": 0.73,
+    },
+    {
+        "ticket_id": "ticket-075",
+        "title": "Intermittent dashboard slowness with unclear urgency",
+        "requester": "support@blueshore.app",
+        "description": (
+            "A manager reports dashboard slowness for some users but did not provide timing, "
+            "scope, or monitoring data. They asked whether this should be treated as an incident."
+        ),
+        "issue_type": "application_support",
+        "priority": "medium",
+        "assignment_group": "application_team",
+        "resolution_action": "assign",
+        "ambiguity_note": (
+            "User-impact breadth is unknown, so severity and ownership urgency remain uncertain."
+        ),
+        "planning_note": (
+            "Application support should investigate first. If blast radius expands, service desk "
+            "can coordinate communications while engineering escalates mitigation."
+        ),
+        "customer_update_note": (
+            "The requester said they can share logs later today, but not yet."
+        ),
+        "incident_recommended": True,
+        "service_cluster_id": "blueshore_latency_triage",
+        "alternate_priority": "high",
+        "alternate_assignment_group": "service_desk",
+        "alternate_resolution_action": "escalate",
+        "alternate_route_score_multiplier": 0.77,
+    },
 ]
 
 

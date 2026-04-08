@@ -11,8 +11,10 @@ from server.grader import (
     PRIORITY_SCORES,
     RESOLUTION_ACTION_SIMILARITY,
     TASK_WEIGHTS,
+    calibrate_task_score,
     grade_action,
 )
+from server.tasks import load_dataset
 from vocabulary import ASSIGNMENT_GROUPS, ISSUE_TYPES, PRIORITIES, RESOLUTION_ACTIONS
 
 
@@ -25,7 +27,7 @@ def _expected_task_score(task_id: int, **field_scores: float) -> float:
         field_scores[field] * TASK_WEIGHTS[task_id][field]
         for field in TASK_WEIGHTS[task_id]
     )
-    return max(0.0, min(1.0, raw_score))
+    return calibrate_task_score(raw_score)
 
 
 def _ticket(
@@ -340,7 +342,7 @@ class GraderUnitTests(unittest.TestCase):
 
         score, breakdown = grade_action(action, ticket, task_id=3)
 
-        self.assertAlmostEqual(score, 0.85)
+        self.assertAlmostEqual(score, calibrate_task_score(0.85))
         self.assertEqual(
             breakdown,
             {
@@ -350,6 +352,53 @@ class GraderUnitTests(unittest.TestCase):
                 "resolution_action": 0.85,
             },
         )
+
+    def test_naive_fixed_action_stays_low_on_average(self) -> None:
+        dataset = load_dataset()
+        naive_action = HelpdeskTicketAction(
+            issue_type="general_inquiry",
+            priority="medium",
+            assignment_group="service_desk",
+            resolution_action="acknowledge",
+        )
+
+        scores = [grade_action(naive_action, ticket, task_id=3)[0] for ticket in dataset]
+        average_score = sum(scores) / len(scores)
+
+        self.assertLess(
+            average_score,
+            0.45,
+            f"Naive fixed action is scoring too high on average: {average_score:.4f}",
+        )
+
+    def test_score_distribution_spans_low_mid_high_bands(self) -> None:
+        dataset = load_dataset()
+        high_scores: list[float] = []
+        low_scores: list[float] = []
+        for ticket in dataset:
+            oracle = HelpdeskTicketAction(
+                issue_type=ticket.issue_type,
+                priority=ticket.priority,
+                assignment_group=ticket.assignment_group,
+                resolution_action=ticket.resolution_action,
+            )
+            adversarial = HelpdeskTicketAction(
+                issue_type="spam_phishing",
+                priority="low",
+                assignment_group="service_desk",
+                resolution_action="acknowledge",
+            )
+            high_scores.append(grade_action(oracle, ticket, task_id=3)[0])
+            low_scores.append(grade_action(adversarial, ticket, task_id=3)[0])
+
+        combined = high_scores + low_scores
+        has_low = any(score < 0.25 for score in combined)
+        has_mid = any(0.25 <= score <= 0.75 for score in combined)
+        has_high = any(score > 0.75 for score in combined)
+
+        self.assertTrue(has_low, "Expected at least one low-band score (<0.25)")
+        self.assertTrue(has_mid, "Expected at least one mid-band score (0.25-0.75)")
+        self.assertTrue(has_high, "Expected at least one high-band score (>0.75)")
 
     def test_resolution_action_partial_credit_uses_declared_similarity_table(self) -> None:
         ticket = _ticket()
