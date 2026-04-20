@@ -14,226 +14,58 @@ tags:
 
 # IT Helpdesk Ticket Routing OpenEnv
 
-> Meta PyTorch OpenEnv Hackathon Round 1 submission  
-> Team Hackstreet Boys: Roopal Guha Neogi, Suyash Kumar
+IT Helpdesk Ticket Routing is a deterministic OpenEnv environment for queue-based enterprise support operations. The agent sees one ticket at a time and must choose the correct issue type, priority, assignment group, and resolution action while handling investigation, clarification, deferral, incident management, and queue-level tradeoffs.
 
-This repository contains a deterministic OpenEnv environment for IT helpdesk ticket routing. An agent is shown one ticket at a time from a short queue and must predict the right issue type, operational priority, assignment group, and next action.
+If you are comfortable reading intermediate Python projects, this repo should feel straightforward: start the server, reset an episode, step through ticket decisions, and inspect how the environment scores and evolves.
 
-## Judge-Facing Summary
+## Highlights
 
-If a judge reads only one short explanation, it should be this:
-
-- this environment models a real enterprise workflow, not a toy classification task
-- each ticket requires typed routing decisions that are easy to score deterministically
-- the task ladder now keeps full routing on every task and scales observability, queue pressure, and operational controls instead
-- the repo is small enough to rerun quickly and explicit enough to understand without hidden business logic
-
-## What This Environment Simulates
-
-The environment models a realistic helpdesk workflow:
-
-1. a new ticket enters the queue
-2. the agent reads the ticket title and description
-3. the agent may investigate, request more information, open an incident, defer the ticket, or submit a routing decision
-4. the queue state mutates: capacity shrinks, incidents stay open, deferred tickets return later, poor handling can spawn follow-up tickets, and good or bad handling can reshape later tickets in the same request cluster
-5. the grader assigns deterministic credit
-6. the environment advances until the queue is complete
-
-For hard-task tickets, the environment can now withhold decisive routing context until the agent uses the right investigation tool. That keeps the task from collapsing into one-shot classification and makes tool choice part of the policy.
-
-This domain is useful for OpenEnv because it is operationally realistic, easy to evaluate with typed outputs, and naturally supports a clean easy-to-hard task ladder.
-
-## Why This Is A Good Hackathon Domain
-
-- it reflects real enterprise support operations
-- the action space is structured and judge-friendly, but now includes meaningful operational controls beyond investigate-versus-submit
-- correctness can be scored deterministically
-- the hard task is meaningfully harder than the easy and medium tasks
-- the environment is small enough to rerun quickly
+- real-world workflow: this models the kind of routing decisions human helpdesk teams actually make
+- typed scoring: every final routing decision is deterministic and easy to grade
+- meaningful difficulty ladder: all three tasks keep the same output contract while adding hidden context and queue pressure
+- queue consequences: earlier decisions can change later tickets, capacity, incident coverage, and terminal reward
+- reproducible baseline: `inference.py` runs deterministically and the repo includes a fixed-seed regression sweep
 
 ## Environment Overview
 
-The project uses a queue-based episode model.
+Each episode is a short ticket queue. The agent may:
 
-- `reset()` samples a task and a queue of 3 to 5 tickets
-- `step()` lets the agent investigate, request clarification, defer, open incidents, or submit one ticket at a time
-- `state()` exposes the internal episode snapshot
-- hard-task episodes also track queue-level capacity, incident slots, clustered follow-on tickets, alternate acceptable routes, planning penalties, SLA pressure, and dynamic follow-up tickets across the queue
-- final evaluation is based on the queue outcome, not on isolated per-ticket classification alone
+- investigate hidden context with a small tool surface
+- request clarification before committing
+- defer a ticket and accept later queue consequences
+- open an incident for risky tickets
+- submit the final routing decision
 
-The environment classes and vocabulary are intentionally frozen to keep collaboration and judging simple.
+The effective dataset currently contains 78 deterministic helpdesk records after loading the checked-in dataset plus curated queue-expansion records. Hard episodes can hide decisive routing context until the right tool is used and can generate downstream follow-up work when earlier handling is weak.
 
-## Lightweight Policy Improvement Loop
-
-The repo includes a local policy runner in `policy_learning.py`. It still does not update model weights, but it now does more than cosmetic search: it evaluates repeated seeded rollouts, learns cue-conditioned tool preferences for investigation, uses the same planning-aware deterministic submit logic as `inference.py`, and ranks policies by terminal rubric reward first, then queue-management quality, with lower planning penalty as the next tie-breaker.
-
-That gives the project a meaningful improvement loop for judge demos:
-
-- compare `no_investigation`, `investigate_when_context_hidden`, and `adaptive_cue_bandit`
-- log per-step rewards, feedback summaries, planning penalties, and reward components to JSONL
-- learn when to use `lookup_queue_capacity_forecast` and `lookup_queue_cluster_summary` versus the other investigation tools
-- select the best policy on train seeds, then re-evaluate it on holdout seeds
-
-Example commands:
-
-```bash
-python policy_learning.py compare --seeds 42-51 --task-ids 1,2,3
-python policy_learning.py search --train-seeds 40-49 --eval-seeds 50-59 --task-ids 1,2,3
-```
-
-Artifacts are written to `analysis/policy_learning_runs/` by default:
-
-- `compare_summary.json`
-- `compare_episodes.jsonl`
-- `compare_trajectories.jsonl`
-- `search_summary.json`
-- `search_train_episodes.jsonl`
-- `search_train_trajectories.jsonl`
-- `search_eval_episodes.jsonl`
-- `search_eval_trajectories.jsonl`
-
-The default submit policy inside this runner stays deterministic and local. It reuses the repo's heuristic routing logic plus planning-aware routing overrides, and the policy loop can now also exercise operational actions such as `request_info`, `open_incident`, and `defer` without depending on external LLM latency or API cost.
+A typical episode looks like this: the environment shows one ticket, the agent can inspect or ask for more context if needed, then it either routes the ticket immediately or defers it and accepts the queue impact later in the episode.
 
 ## Task Ladder
 
-| ID | Name | Difficulty | Required Fields | What The Agent Must Do |
-|----|------|------------|-----------------|-------------------------|
-| 1 | Guided Full Routing | Easy | `issue_type`, `priority`, `assignment_group`, `resolution_action` | route a mostly visible ticket correctly |
-| 2 | Contextual Full Routing | Medium | `issue_type`, `priority`, `assignment_group`, `resolution_action` | route under partial observability with investigation, clarification, and moderate queue carry-over |
-| 3 | Adaptive Queue Routing | Hard | `issue_type`, `priority`, `assignment_group`, `resolution_action` | route while managing queue pressure, incidents, clustered follow-ons, deferrals, and downstream follow-ups |
+| ID | Name | Difficulty | Required Fields | What Changes |
+|----|------|------------|-----------------|--------------|
+| 1 | Guided Full Routing | Easy | `issue_type`, `priority`, `assignment_group`, `resolution_action` | mostly visible single-ticket routing |
+| 2 | Contextual Full Routing | Medium | `issue_type`, `priority`, `assignment_group`, `resolution_action` | partial observability, investigation, clarification, moderate queue carry-over |
+| 3 | Adaptive Queue Routing | Hard | `issue_type`, `priority`, `assignment_group`, `resolution_action` | hidden context, queue pressure, deferrals, incident handling, clustered follow-ons |
 
-## Action And Observation Contract (Concise)
+## Action Space
 
-| Contract Surface | Fields / Types | Rules |
-|------------------|----------------|-------|
-| Action (submit) | `action_type="submit"` plus all required routing fields (`issue_type`, `priority`, `assignment_group`, `resolution_action`) | Missing or extra submit fields are treated as invalid and get a deterministic penalty step |
-| Action (investigate) | `action_type="investigate"`, `tool_name`, optional `tool_target_ticket_id` | Submit fields are not allowed; unsupported tools are penalized deterministically |
-| Action (operational) | `action_type in {"request_info","defer","open_incident"}` | Submit fields and tool fields are not allowed; malformed payloads are penalized deterministically |
-| Observation core | `done: bool`, `reward: float-or-null`, `rubric_reward: float-or-null`, `current_ticket: object-or-null`, queue counters | `reward` is per-step signal, `rubric_reward` appears on terminal observations |
-| Observation routing contract | `allowed_fields: list[str]`, `available_action_types: list[str]`, `available_tools: list[str]` | Agents must obey these lists; invalid actions are graded as penalty steps |
-| Determinism guarantee | `reset(seed=...)` controls queue sampling and episode transitions | Same seed + task + action sequence => same queue order, rewards, and episode trajectory |
-| Episode termination | `done=True` when queue is exhausted with no pending follow-up ticket | Terminal step includes final queue-level rubric and terminal `reward` |
+| Action Type | Required Fields | Notes |
+|-------------|-----------------|-------|
+| `submit` | `issue_type`, `priority`, `assignment_group`, `resolution_action` | final routing answer for the current ticket |
+| `investigate` | `tool_name`, optional `tool_target_ticket_id` | reveals hidden context when the right tool is used |
+| `request_info` | none | asks for clarification on the current ticket |
+| `open_incident` | none | reserves incident handling capacity before routing risky tickets |
+| `defer` | none | pushes the ticket later in the queue and can create downstream penalties |
 
-## Locked Vocabulary
+Locked submit vocabularies:
 
-### Issue types
+- `issue_type`: `billing_license`, `identity_access`, `application_support`, `service_request`, `spam_phishing`, `general_inquiry`, `security_compliance`, `onboarding`, `feature_request`
+- `priority`: `critical`, `high`, `medium`, `low`
+- `assignment_group`: `license_ops`, `service_desk`, `application_team`, `procurement`, `security_team`, `onboarding_ops`
+- `resolution_action`: `fulfill`, `escalate`, `assign`, `ignore`, `acknowledge`
 
-- `billing_license`
-- `identity_access`
-- `application_support`
-- `service_request`
-- `spam_phishing`
-- `general_inquiry`
-- `security_compliance`
-- `onboarding`
-- `feature_request`
-
-### Priorities
-
-- `critical`
-- `high`
-- `medium`
-- `low`
-
-### Assignment groups
-
-- `license_ops`
-- `service_desk`
-- `application_team`
-- `procurement`
-- `security_team`
-- `onboarding_ops`
-
-### Resolution actions
-
-- `fulfill`
-- `escalate`
-- `assign`
-- `ignore`
-- `acknowledge`
-
-## Observation And State Model
-
-The agent only sees routing inputs, not labels.
-
-Visible ticket fields:
-
-- `ticket_id`
-- `title`
-- `requester`
-- `description`
-- optional `ambiguity_note`
-- optional `planning_note`
-- optional `customer_update_note`
-- optional `related_ticket_id`
-- optional `related_ticket_preview`
-- optional `routing_options`
-- optional `capacity_state`
-- optional `operational_context`
-- optional `cluster_summary`
-- optional `generated_from_ticket_id`
-
-Each observation also includes:
-
-- `task_id`
-- `task_name`
-- `instructions`
-- `allowed_fields`
-- `available_action_types`
-- `available_tools`
-- `investigation_budget_remaining`
-- `last_tool_result`
-- `queue_size`
-- `tickets_remaining`
-- `tickets_after_current`
-- `tickets_processed`
-- `queue_position`
-- `average_score_so_far`
-- `progress_fraction`
-- `history`
-- `last_reward_components`
-- `rubric_reward` on terminal observations
-- `metadata.last_feedback_summary` for compact reward / penalty feedback
-- `metadata.capacity_state` on hard-task episodes
-- `metadata.planning_penalty_total` and `metadata.planning_penalty_applied`
-- standard OpenEnv fields such as `done` and `reward`
-
-The internal `HelpdeskTicketState` tracks:
-
-- `episode_id`
-- `step_count`
-- `current_task_id`
-- `seed`
-- `queue_ticket_ids`
-- `current_ticket_index`
-- `per_ticket_scores`
-- `total_reward`
-- `reward`
-- `done`
-- `team_capacity_remaining`
-- `high_priority_slots_remaining`
-- `escalation_slots_remaining`
-- `incident_slots_remaining`
-- `planning_penalty_total`
-- `incident_gap_total`
-- `sla_breach_count`
-- `queue_management_score`
-- `queue_management_breakdown`
-- `dynamic_queue_events`
-
-## Grading And Reward
-
-Scoring is deterministic and normalized to `[0.0, 1.0]`.
-
-The action model now supports five paths:
-
-- `action_type="submit"` for the final routing answer
-- `action_type="investigate"` with a small built-in tool surface before submission
-- `action_type="request_info"` to ask for customer / operator clarification on the current ticket
-- `action_type="open_incident"` to reserve incident handling capacity before routing risky tickets
-- `action_type="defer"` to push a ticket later in the queue and accept the downstream queue consequences
-
-Available tools:
+Available investigation tools:
 
 - `lookup_related_ticket`
 - `lookup_requester_history`
@@ -241,121 +73,133 @@ Available tools:
 - `lookup_queue_capacity_forecast`
 - `lookup_queue_cluster_summary`
 
-Hard-task investigation behavior:
+Invalid, partial, or schema-mismatched actions are handled through a deterministic penalty path.
 
-- some ambiguous and non-default-routing tickets start with both redacted titles and redacted descriptions
-- linked-ticket previews and internal routing notes stay hidden until the matching tool is used
-- capacity-sensitive tickets can expose queue pressure, future demand, and alternate routing options through `lookup_queue_capacity_forecast`
-- cluster-sensitive tickets can expose future related tickets, shared-requester load, and active incident coverage through `lookup_queue_cluster_summary`
-- detailed cluster counts and future queue-demand breakdowns stay hidden until the matching queue tool is used
-- only useful investigation steps return a small positive shaping reward
-- blind or repeated probing does not pay by default
-- premature hard-task submission can incur a shaping penalty even when the visible text looks plausible
-- resource-greedy routing can add planning penalties later in the queue even when a single ticket looks correct in isolation
-- incident-sensitive tickets can require an explicit `open_incident` step to avoid future follow-up debt
-- strong handling on an earlier clustered ticket can make later tickets cheaper to acknowledge, while weak handling can escalate those later tickets
-- bad or incomplete hard-task handling can append a deterministic follow-up ticket later in the same episode
-- terminal `rubric_reward` remains the objective evaluation signal, while per-step `reward` is the denser training signal
+## Observation And State Space
 
-Per-field behavior:
+Each observation includes:
 
-- `issue_type`: exact match, with a few near-miss partial-credit pairs
-- `priority`: exact match or proximity credit
-- `assignment_group`: exact match, with a small declared partial-credit map for nearby ownership mistakes
-- `resolution_action`: exact match, with a small declared partial-credit map for nearby next-step mistakes
-- hard task only: some tickets also declare an alternate acceptable route with a reduced score multiplier, so the grader can reward capacity-aware fallback choices without collapsing into full fuzziness
+- task metadata: `task_id`, `task_name`, `instructions`
+- routing contract: `allowed_fields`, `available_action_types`, `available_tools`
+- current ticket fields such as `ticket_id`, `title`, `requester`, `description`, and optional extra context such as `ambiguity_note`, `planning_note`, `related_ticket_preview`, `capacity_state`, and `cluster_summary`
+- queue progress: `queue_size`, `tickets_remaining`, `tickets_processed`, `queue_position`, `progress_fraction`
+- feedback and reward telemetry: `reward`, `rubric_reward`, `last_reward_components`, `average_score_so_far`, `history`
+- episode status: `done`
 
-Task weights:
+`state()` exposes the internal episode snapshot, including the current queue, cumulative reward, per-ticket scores, capacity counters, incident usage, planning penalties, queue-management metrics, and any follow-up events created by earlier decisions.
 
-| Task | Issue Type | Priority | Assignment Group | Resolution Action |
-|------|------------|----------|------------------|-------------------|
-| 1 | 40% | 20% | 20% | 20% |
-| 2 | 32% | 20% | 24% | 24% |
-| 3 | 30% | 20% | 25% | 25% |
+## Determinism And Scoring
 
-Final episode rubric reward is queue-based:
+- `reset(seed=..., task_id=...)` deterministically controls queue sampling and episode setup
+- same seed + same action sequence => same queue order, rewards, and episode outcome
+- both per-step `reward` and terminal `rubric_reward` stay in `[0.0, 1.0]`
+- hard-task tickets may expose alternate acceptable routes with explicit score multipliers
+- queue management matters: the final score blends routing quality with how well the episode was handled overall
 
-```text
-clamp(route_trajectory_reward * route_weight + queue_management_score * queue_weight - extra investigation penalties)
+## Quick Start
+
+Install dependencies:
+
+```bash
+pip install -r requirements.txt
+pip install -e .
 ```
 
-Both `reward` and `rubric_reward` now use the closed interval `[0.0, 1.0]`.
+Run the server locally:
 
-Step reward is lightly milestone-shaped: high per-ticket scores get a small bonus and very low scores get a small penalty before the final clamp.
+```bash
+uvicorn server.app:app --host 0.0.0.0 --port 7860
+```
 
-Final reward also includes a queue-economics penalty when the agent exceeds the free investigation budget. One investigation-style step per queued ticket is free, but extra investigation or clarification steps reduce the final reward more noticeably than before. On hard-task queues, assignment-group capacity, high-priority slots, escalation slots, incident slots, and deferred-ticket SLA pressure all create cross-ticket trade-offs.
+Basic checks:
 
-To make the environment more RL-friendly, each observation now also surfaces structured reward telemetry:
+```bash
+curl http://localhost:7860/health
+curl http://localhost:7860/tasks
+```
 
-- `last_reward_components` exposes ticket score, shaped step reward, milestone adjustment, trajectory reward when applicable, and any investigation penalty applied
-- `average_score_so_far` and `progress_fraction` expose trajectory progress without leaking future labels
-- medium and hard telemetry now also exposes terminal `queue_management_score` plus a queue-management breakdown
-- hard-task telemetry includes planning penalties, capacity usage, and the post-action capacity snapshot
-- `history` retains the same reward components plus a compact `feedback_summary` string for downstream agents
+## Baseline Inference
 
-## Grounded Scoring
+### Heuristic mode
 
-The grader is intentionally narrow and declared, not fully fuzzy.
+If no LLM credentials are set, the baseline uses deterministic local routing heuristics:
 
-- exact match is the dominant path for every field
-- `assignment_group` and `resolution_action` now expose only a small declared partial-credit map for nearby mistakes
-- `priority` only gets proximity credit from the declared table in `server/grader.py`
-- `issue_type` only gets partial credit for a small declared similarity map
-- hard-task alternate routes must be explicitly declared in the dataset and carry an explicit score multiplier
-- wrong labels outside those explicit maps score `0.0`
+```bash
+python inference.py
+```
 
-That scoring policy is now backed by checked-in unit tests in `tests/test_grader_unit.py` and `tests/test_tasks_unit.py`.
+To target one task explicitly:
 
-The label set and partial-credit choices were also reviewed against public IT-support references during development, including:
+```bash
+TASK_ID=3 python inference.py
+```
 
-- `Classification of IT Support Tickets`
-- `Semantic Similarity of IT Support Tickets`
-- `MSDialog`
+### LLM mode
 
-That grounding pass supported keeping the current similarity map small and explainable. No new issue-type similarity pairs were added from the review.
+`inference.py` supports OpenAI-client execution with the required evaluator-style environment variables:
 
-## Dataset Snapshot
+- `API_BASE_URL`
+- `MODEL_NAME`
+- `API_KEY`
+- `HF_TOKEN`
 
-The effective labeled dataset now contains 70 tickets spanning straightforward, ambiguous, and planning-sensitive helpdesk scenarios.
+Then run:
 
-It includes:
+```bash
+python inference.py
+```
 
-- billing and license requests
-- identity and access issues
-- application support incidents
-- service and procurement requests
-- spam or phishing reports
-- security and compliance work
-- onboarding tickets
-- feature requests
-- follow-up cases linked through `related_ticket_id`
-- 16 tickets with explicit ambiguity notes
-- 7 linked follow-up cases
-- 22 tickets with declared alternate routes for queue-level planning
+Optional runtime variables:
 
-## Difficulty Coverage
+- `ENV_URL` (default: `http://localhost:7860`)
+- `SEED`
+- `TASK_ID`
+- `RUN_ALL_TASKS` (compatibility alias; all tasks already run by default when `TASK_ID` is unset)
 
-The difficulty ladder is now visible in observability and control, not just in the submitted field count.
+### Reproducibility sweep
 
-Easy-style examples:
+```bash
+python scripts/baseline_repro_check.py --seeds 42-46 --task-ids 1,2,3 --expect-min 0.40 --expect-max 0.95
+```
 
-- `ticket-020`: straightforward general inquiry with low urgency and a clean `general_inquiry` label
-- `ticket-041`: clear onboarding request for a new contractor account
-- `ticket-044`: obvious phishing-style lure that should map cleanly to `spam_phishing`
+Example fixed-seed baseline snapshot from that command:
 
-Medium-style examples:
+| Metric | Value |
+|--------|-------|
+| Task 1 average | `0.6866` |
+| Task 2 average | `0.3206` |
+| Task 3 average | `0.3259` |
+| Overall average | `0.4444` |
+| Observed min / max | `0.2162` / `0.8579` |
 
-- `ticket-001`: billing dispute that still requires the agent to judge urgency correctly
-- `ticket-028`: application incident where the issue type is clear but priority still matters
-- `ticket-036`: procurement-style proof-of-concept request that should route as a `service_request`
+## Docker
 
-Hard-style examples:
+Build:
 
-- `ticket-022`: mixed billing and application signals in one ticket
-- `ticket-029`: seat expansion combined with a prorating question
-- `ticket-038`: follow-up billing thread with escalated urgency
-- `ticket-045`: repeated account suspension thread with legal-escalation pressure
-- generated `*-followup` tickets: deterministic reopened cases that only appear when the earlier handling was incomplete or operationally risky
+```bash
+docker build -t helpdesk-ticket-routing-root .
+```
+
+Run:
+
+```bash
+docker run -p 7860:7860 helpdesk-ticket-routing-root
+```
+
+Then point `inference.py` at the container with the default `ENV_URL` or an explicit override.
+
+## API Surface
+
+| Method | Path | Purpose |
+|--------|------|---------|
+| GET | `/health` | health check |
+| POST | `/reset` | start a new episode |
+| POST | `/step` | submit an action |
+| GET | `/state` | inspect internal state |
+| GET | `/tasks` | list task metadata |
+| GET | `/web` | lightweight Hugging Face Space UI |
+| GET | `/docs` | interactive API docs |
+| GET | `/baseline` | deterministic baseline rollout helper |
 
 ## Repository Layout
 
@@ -372,197 +216,19 @@ data/
 models.py
 client.py
 inference.py
-vocabulary.py
+scripts/
+  baseline_repro_check.py
 openenv.yaml
 pyproject.toml
 requirements.txt
-README.md
-KNOWLEDGE.md
-required.md
-PROJECT_STATUS.md
 ```
 
-## Core Files
+## Validation
 
-- `models.py`: typed action, observation, state, and dataset record models
-- `server/environment.py`: queue-based episode engine
-- `server/tasks.py`: task definitions and dataset loader
-- `server/grader.py`: deterministic scoring logic
-- `server/reward.py`: reward helpers
-- `client.py`: typed client for multi-step episodes
-- `inference.py`: baseline agent runner
-- `vocabulary.py`: frozen constants and routing defaults
+The project includes the main checks you would expect for a reproducible environment:
 
-## Local Setup
-
-Install dependencies:
-
-```bash
-pip install -r requirements.txt
-pip install -e .
-```
-
-Start the environment locally:
-
-```bash
-uvicorn server.app:app --host 0.0.0.0 --port 7860
-```
-
-Basic checks:
-
-```bash
-curl http://localhost:7860/health
-curl http://localhost:7860/tasks
-```
-
-## Running The Baseline Inference Script
-
-The baseline script defaults to all declared tasks when `TASK_ID` is not set, which keeps local runs aligned with validator-style sweeps.
-
-### Heuristic mode
-
-If no LLM credentials are set, it uses a keyword-based ticket router:
-
-```bash
-python inference.py
-```
-
-By default that runs all declared tasks and emits a structured `[START] ... [STEP] ... [END]` block for each task. To target a specific task:
-
-```bash
-TASK_ID=3 python inference.py
-```
-
-### LLM mode
-
-Set these environment variables first:
-
-  - `API_BASE_URL`
-  - `MODEL_NAME`
-  - `API_KEY`
-  - `HF_TOKEN`
-
-Then run:
-
-```bash
-python inference.py
-```
-
-Optional target:
-
-- `ENV_URL`
-- default value: `http://localhost:7860`
-- `SEED`
-- `TASK_ID`
-- `RUN_ALL_TASKS`
-  compatibility alias for local tooling; all tasks already run by default when `TASK_ID` is unset
-
-To reproduce the multi-task local benchmark sweep:
-
-```bash
-RUN_ALL_TASKS=1 python inference.py
-```
-
-For baseline reproducibility gating over fixed seeds:
-
-```bash
-python scripts/baseline_repro_check.py --seeds 42-46 --task-ids 1,2,3 --expect-min 0.40 --expect-max 0.95
-```
-
-## Runtime Validation Snapshot
-
-The repo has now completed both the first local heuristic validation pass and a merged-state rerun on the current `main` branch.
-
-Validated locally:
-
-- server startup
-- `/health`
-- `/tasks`
-- `/reset`
-- heuristic `inference.py` run across all 3 tasks with `RUN_ALL_TASKS=1`
-
-Current local smoke expectations:
-
-- the baseline completes all 3 tasks successfully
-- rewards remain in range for every task
-- the hard task now depends much more heavily on investigation behavior, so exact seed-level baseline numbers are no longer treated as the benchmark reference for the repo
-
-The April 6 to April 7 validation pass then closed the remaining validation gates with Docker smoke coverage via GitHub Actions, a clean-copy install-and-run rerun, structured inference-log verification, and a passing local `openenv validate` check after checking in `uv.lock`.
-
-### Windows note
-
-During the first runtime pass, the repo surfaced a Windows-specific JSON issue where `data/dataset.json` could include a UTF-8 BOM. The dataset loader in `server/tasks.py` now reads the file with `utf-8-sig`, so the environment resets cleanly even when the file was saved by a Windows editor.
-
-## Docker
-
-Build:
-
-```bash
-docker build -t helpdesk-ticket-routing .
-```
-
-Run locally:
-
-```bash
-docker run -p 7860:7860 helpdesk-ticket-routing
-```
-
-Then run inference against it (default `ENV_URL` points to `http://localhost:7860`):
-
-```bash
-RUN_ALL_TASKS=1 python inference.py
-```
-
-If you publish the container on a different host port, set `ENV_URL` accordingly before running `inference.py`.
-
-If local Docker is blocked by machine setup, the repo also includes a GitHub Actions smoke test at `.github/workflows/docker-smoke-test.yml`. That workflow builds the image on a GitHub-hosted runner, starts the container, checks `/health` and `/tasks`, and runs heuristic `inference.py` against the container.
-
-OpenEnv compliance and reproducibility regression checks are also enforced in `.github/workflows/openenv-validate-and-smoke.yml`, which runs `openenv validate`, the seeded baseline reproducibility command, and smoke tests.
-
-## API Surface
-
-OpenEnv provides the core environment endpoints, and the repo adds a custom task listing route.
-
-| Method | Path | Purpose |
-|--------|------|---------|
-| GET | `/health` | health check |
-| POST | `/reset` | start a new episode |
-| POST | `/step` | submit an action |
-| GET | `/state` | inspect internal state |
-| GET | `/tasks` | list task metadata |
-| GET | `/web` | lightweight HF Space UI |
-| GET | `/docs` | interactive API docs |
-
-## Submission Readiness
-
-The repo is already aligned on:
-
-- team name and members
-- domain and vocabulary
-- task ladder
-- typed models
-- grader and reward design
-- packaging metadata and Docker entry point
-- Hugging Face Spaces README frontmatter
-- judge-facing documentation of deterministic, grounded scoring
-
-An April 6 repo audit also confirmed that all required submission files are present:
-
-- runtime: `models.py`, `client.py`, `inference.py`, `server/app.py`, `server/environment.py`, `server/grader.py`, `server/reward.py`, `server/tasks.py`
-- data and metadata: `data/dataset.json`, `openenv.yaml`, `pyproject.toml`, `requirements.txt`, `server/Dockerfile`
-- docs and project guidance: `README.md`, `KNOWLEDGE.md`, `required.md`, `PROJECT_STATUS.md`
-
-Roadmap status through April 7 is complete:
-
-- unit, smoke, and integration tests are checked in and green
-- Docker smoke coverage exists through `.github/workflows/docker-smoke-test.yml`
-- `openenv validate` now passes on the current repo state
-- structured `inference.py` logging is verified by tests and the merged-state rerun
-- a clean-copy install-and-run pass has been completed
-
-The remaining April 8 work is operational rather than implementation-heavy:
-
-- run the final submission-branch sanity slice before pushing
-- perform the live Hugging Face Space ping and reset check on the deployed submission artifact if a fresh deployment is created
-
-The short TRL / GRPO README example remains intentionally deferred because it is optional and lower priority than benchmark clarity and stability.
+- `openenv validate` passes
+- the baseline reproducibility sweep passes on fixed seeds
+- smoke tests cover reset, seeded determinism, score bounds, and reward transparency
+- Docker can be built and run locally
+- the Hugging Face Space serves `/health`, `/tasks`, `/docs`, and `/baseline`
