@@ -14,12 +14,11 @@ tags:
 
 # IT Helpdesk Ticket Routing OpenEnv
 
-> Meta PyTorch OpenEnv Hackathon Round 1 submission
-> Team Hackstreet Boys: Roopal Guha Neogi, Suyash Kumar
-
 IT Helpdesk Ticket Routing is a deterministic OpenEnv environment for queue-based enterprise support operations. The agent sees one ticket at a time and must choose the correct issue type, priority, assignment group, and resolution action while handling investigation, clarification, deferral, incident management, and queue-level tradeoffs.
 
-## Judge-Facing Summary
+If you are comfortable reading intermediate Python projects, this repo should feel straightforward: start the server, reset an episode, step through ticket decisions, and inspect how the environment scores and evolves.
+
+## Highlights
 
 - real-world workflow: this models the kind of routing decisions human helpdesk teams actually make
 - typed scoring: every final routing decision is deterministic and easy to grade
@@ -38,6 +37,8 @@ Each episode is a short ticket queue. The agent may:
 - submit the final routing decision
 
 The effective dataset currently contains 78 deterministic helpdesk records after loading the checked-in dataset plus curated queue-expansion records. Hard episodes can hide decisive routing context until the right tool is used and can generate downstream follow-up work when earlier handling is weak.
+
+A typical episode looks like this: the environment shows one ticket, the agent can inspect or ask for more context if needed, then it either routes the ticket immediately or defers it and accepts the queue impact later in the episode.
 
 ## Task Ladder
 
@@ -80,20 +81,20 @@ Each observation includes:
 
 - task metadata: `task_id`, `task_name`, `instructions`
 - routing contract: `allowed_fields`, `available_action_types`, `available_tools`
-- current ticket fields such as `ticket_id`, `title`, `requester`, `description`, and optional hidden-context surfaces like `ambiguity_note`, `planning_note`, `related_ticket_preview`, `capacity_state`, and `cluster_summary`
+- current ticket fields such as `ticket_id`, `title`, `requester`, `description`, and optional extra context such as `ambiguity_note`, `planning_note`, `related_ticket_preview`, `capacity_state`, and `cluster_summary`
 - queue progress: `queue_size`, `tickets_remaining`, `tickets_processed`, `queue_position`, `progress_fraction`
 - feedback and reward telemetry: `reward`, `rubric_reward`, `last_reward_components`, `average_score_so_far`, `history`
 - episode status: `done`
 
-`state()` exposes the internal episode snapshot, including the current queue, cumulative reward, per-ticket scores, capacity counters, incident usage, planning penalties, queue-management metrics, and dynamic follow-up events.
+`state()` exposes the internal episode snapshot, including the current queue, cumulative reward, per-ticket scores, capacity counters, incident usage, planning penalties, queue-management metrics, and any follow-up events created by earlier decisions.
 
 ## Determinism And Scoring
 
 - `reset(seed=..., task_id=...)` deterministically controls queue sampling and episode setup
-- same seed + same action sequence => same queue order, rewards, and terminal trajectory
+- same seed + same action sequence => same queue order, rewards, and episode outcome
 - both per-step `reward` and terminal `rubric_reward` stay in `[0.0, 1.0]`
 - hard-task tickets may expose alternate acceptable routes with explicit score multipliers
-- strong queue management matters: terminal reward blends routing quality with queue-management quality
+- queue management matters: the final score blends routing quality with how well the episode was handled overall
 
 ## Quick Start
 
@@ -161,7 +162,7 @@ Optional runtime variables:
 python scripts/baseline_repro_check.py --seeds 42-46 --task-ids 1,2,3 --expect-min 0.40 --expect-max 0.95
 ```
 
-Latest fixed-seed baseline snapshot from that command:
+Example fixed-seed baseline snapshot from that command:
 
 | Metric | Value |
 |--------|-------|
@@ -222,13 +223,12 @@ pyproject.toml
 requirements.txt
 ```
 
-## Validation Snapshot
+## Validation
 
-The branch and submission-ready repo state are designed to satisfy the key OpenEnv gates:
+The project includes the main checks you would expect for a reproducible environment:
 
 - `openenv validate` passes
 - the baseline reproducibility sweep passes on fixed seeds
 - smoke tests cover reset, seeded determinism, score bounds, and reward transparency
-- Docker smoke coverage is checked through GitHub Actions
+- Docker can be built and run locally
 - the Hugging Face Space serves `/health`, `/tasks`, `/docs`, and `/baseline`
-
